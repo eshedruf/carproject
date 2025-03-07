@@ -10,7 +10,7 @@ def getLaneCurve(img):
     #step 2
     h, w, c = img.shape
     points = utils.valTrackbars()
-    imgWarp = utils.warpImg(img, points, w, h)
+    imgWarp = utils.warpImg(imgThres, points, w, h)
     
 
     cv2.imshow('Threshold', imgThres)
@@ -42,6 +42,3 @@ if __name__ == "__main__":
 
     cap.release()
     cv2.destroyAllWindows()
-
-
-        
