@@ -150,3 +150,6 @@ finally:
     motor.stop()
     motor.cleanup()
     cv2.destroyAllWindows()
+    picam2.stop()
+    picam2.close()
+    
