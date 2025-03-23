@@ -4,7 +4,7 @@ import numpy as np
 def thresholding(img):
     imgHsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     
-    lowerBound = np.array([0, 0, 100])   
+    lowerBound = np.array([105, 73, 138])   
     upperBound = np.array([179, 255, 255])  
 
     mask = cv2.inRange(imgHsv, lowerBound, upperBound)

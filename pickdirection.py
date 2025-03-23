@@ -39,18 +39,7 @@ def process_video(video_path):
 
         print(f"Left: {left_black_count} black pixels, Right: {right_black_count} black pixels -> {direction}")
 
-        # Draw a thin vertical line in the middle of the frame
-        center_x = width // 2
-        # For a grayscale image, color is a scalar. Here we choose 128 as a mid-gray value.
-        cv2.line(gray, (center_x, 0), (center_x, height), 128, 1)
-
-        # Display the frame with the drawn line (optional)
-        cv2.imshow("Processed Frame", gray)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
     cap.release()
-    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     video_path = "warp.mp4"  # Change to your video file if needed.
