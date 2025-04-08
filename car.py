@@ -123,12 +123,4 @@ class MotorController:
         self.enb_pwm.stop()
         GPIO.cleanup()
 
-if __name__ == "__main__":
-    try:
-        motor = MotorController()
-        time.sleep(2)
-        motor.move_forward(duty_cycle=0.1, frequency=30, left_calib=1.0, right_calib=0.2)
-        time.sleep(2)
-        motor.stop()
-    finally:
-        motor.cleanup()
+
