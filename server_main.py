@@ -1,88 +1,149 @@
-import socket, struct, json, threading
-import numpy as np, cv2
-from image_utils import ImgUtils
-from pid_controller import PID
-from gui import GUI
+import cv2
+import numpy as np
+import time
+import socket
+import struct
+import json
+from picamera2 import Picamera2
+from car import MotorController
 
-class Server(threading.Thread):
-    """Server thread that receives images, processes them, and updates the GUI."""
-    
-    def __init__(self, gui):
-        super().__init__(daemon=True)
-        self.gui = gui
-        self.sock = socket.socket()
-        self.sock.bind(('', 8000))
-        self.sock.listen(5)
-        self.pid = PID()
-    
-    def run(self):
-        conn, addr = self.sock.accept()
-        self.gui.set_car_ip(addr[0])
-        print(f"Connected by {addr}")
-        while True:
-            head = self._recvall(conn, 4)
-            if not head: break
-            h_len = struct.unpack("!I", head)[0]
-            hdr = json.loads(self._recvall(conn, h_len).decode())
-            d_len = struct.unpack("!I", self._recvall(conn, 4))[0]
-            data = self._recvall(conn, d_len)
-            if data is None:
-                break
-            frame = np.frombuffer(data, dtype=np.dtype(hdr["dtype"])).reshape(hdr["shape"])
-            
-            mask = ImgUtils.threshold(frame)
-            warped = ImgUtils.warp(mask)
-            result = self.pid.process(warped)
-            # Unpack all PID values
-            error, pid_out, left, right, lf, rf, derivative, integral, prev_error = result
-            
-            # If stop flag is active, force outputs to 0
-            if self.gui.control_flags.get("stopped", False):
-                left = right = 0.0
-                lf = rf = 0
-            
-            # Send response with keys matching pi_client.py expectations
-            resp = json.dumps({
-                "left_duty": left,
-                "right_duty": right,
-                "left_freq": lf,
-                "right_freq": rf
-            }) + "\n"
-            conn.sendall(resp.encode())
-            
-            # Prepare the four images for the GUI
-            mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-            warped_bgr = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
-            pid_img = self.gui.pid_graph.update(error, pid_out)
-            
-            # Create debug info string
-            info = (
-                f"Centroid Err: {error:.2f} | PID: {pid_out:.4f}\n"
-                f"Integral: {integral:.4f} | Deriv: {derivative:.4f} | Prev Err: {prev_error:.4f}\n"
-                f"Left Duty: {left:.3f}, Right Duty: {right:.3f} | "
-                f"Left Freq: {lf}, Right Freq: {rf}"
+
+class PiServer:
+    """
+    This class handles the server side of the connection.
+    It listens for a client (remote processor), sends camera frames,
+    and receives JSON responses with PWM values.
+    """
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.sock = None
+        self.conn = None
+
+    def start(self):
+        """Bind, listen, and accept a single client connection."""
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((self.host, self.port))
+        self.sock.listen(1)
+        print(f"Listening for remote processor on {self.host}:{self.port}...")
+        self.conn, addr = self.sock.accept()
+        print(f"Accepted connection from {addr}")
+
+    def send_frame(self, frame):
+        """
+        Sends the frame with header and raw data over the accepted connection,
+        then waits for and returns the JSON response.
+        """
+        # Header with shape and dtype
+        header = {"shape": frame.shape, "dtype": str(frame.dtype)}
+        header_bytes = json.dumps(header).encode('utf-8')
+
+        # Send header length + header
+        self.conn.sendall(struct.pack('!I', len(header_bytes)))
+        self.conn.sendall(header_bytes)
+
+        # Send raw image data length + data
+        raw = frame.tobytes()
+        self.conn.sendall(struct.pack('!I', len(raw)))
+        self.conn.sendall(raw)
+
+        # Receive JSON response (terminated by newline)
+        data = b''
+        while not data.endswith(b"\n"):
+            chunk = self.conn.recv(1024)
+            if not chunk:
+                raise ConnectionError("Connection lost while waiting for response")
+            data += chunk
+
+        resp_str = data.decode('utf-8').strip()
+        return json.loads(resp_str)
+
+    def close(self):
+        if self.conn:
+            self.conn.close()
+        if self.sock:
+            self.sock.close()
+
+
+class CarController:
+    """
+    Initializes the motor controller and camera,
+    captures frames, and applies commands.
+    """
+    def __init__(self):
+        self.motor = MotorController()
+        self.picam2 = Picamera2()
+        config = self.picam2.create_preview_configuration(main={"size": (640, 380)})
+        self.picam2.configure(config)
+        self.picam2.start()
+        time.sleep(2)
+
+    def capture_frame(self):
+        frame = self.picam2.capture_array()
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        frame = cv2.rotate(frame, cv2.ROTATE_180)
+        return frame
+
+    def process_pwm_response(self, pwm):
+        left_duty = pwm.get('left_duty', 0.07)
+        right_duty = pwm.get('right_duty', 0.07)
+        left_freq = pwm.get('left_freq', 50)
+        right_freq = pwm.get('right_freq', 50)
+
+        if left_duty == 0.0 and right_duty == 0.0:
+            self.motor.stop()
+            print("Motor stopped (duty=0)")
+        else:
+            self.motor.move_forward(
+                left_duty=left_duty, right_duty=right_duty,
+                left_freq=left_freq, right_freq=right_freq
             )
-            
-            # Update GUI with the four individual images
-            self.gui.update_gui(frame, mask_bgr, warped_bgr, pid_img, info)
-        conn.close()
-    
-    def _recvall(self, conn, count):
-        buf = b""
-        while count:
-            new = conn.recv(count)
-            if not new:
-                return None
-            buf += new
-            count -= len(new)
-        return buf
+            print(f"PWM -> Ld: {left_duty:.3f}, Rd: {right_duty:.3f}, "
+                  f"Lf: {left_freq}, Rf: {right_freq}")
 
-def main():
-    gui = GUI()
-    server = Server(gui)
-    gui.server = server  # For PID reset access
-    server.start()
-    gui.mainloop()
+    def cleanup(self):
+        self.motor.stop()
+        self.motor.cleanup()
+        self.picam2.stop()
+        self.picam2.close()
 
-if __name__ == "__main__":
-    main()
+
+class CarRemoteServerApp:
+    """
+    Main app: starts the PiServer, then captures frames,
+    sends them to the remote processor, and drives the car.
+    """
+    def __init__(self, host, port, frame_rate=20.0):
+        self.frame_period = 1.0 / frame_rate
+        self.server = PiServer(host, port)
+        self.car = CarController()
+        self.running = False
+
+    def run(self):
+        self.server.start()
+        self.running = True
+        try:
+            while self.running:
+                t0 = time.time()
+                frame = self.car.capture_frame()
+                pwm = self.server.send_frame(frame)
+                self.car.process_pwm_response(pwm)
+                elapsed = time.time() - t0
+                if elapsed < self.frame_period:
+                    time.sleep(self.frame_period - elapsed)
+        except KeyboardInterrupt:
+            print("Stopping by user interrupt.")
+        finally:
+            self.cleanup()
+
+    def cleanup(self):
+        self.car.cleanup()
+        self.server.close()
+
+
+if __name__ == '__main__':
+    HOST = '0.0.0.0'
+    PORT = 8000
+    app = CarRemoteServerApp(HOST, PORT, frame_rate=20.0)
+    app.run()
