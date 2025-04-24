@@ -101,7 +101,7 @@ class Client(threading.Thread):
 
 def main():
     gui = GUI()
-    server_ip = "192.168.0.142"   # Replace with your actual server IP
+    server_ip = "raspitwo.local"   # Replace with your actual server IP
     server_port = 8000            # Replace with your actual server port
     server = Client(gui, server_ip, server_port)
     gui.server = server  # For PID reset access
