@@ -1,95 +1,42 @@
-import socket
-import struct
-import json
 import threading
 import time
-import numpy as np, cv2
+import numpy as np
+import cv2
 from image_utils import ImgUtils
 from pid_controller import PID
 from gui import GUI
 from auth_window import AuthWindow
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_OAEP, AES
-from Crypto import Random
+from protocol import Protocol
+import socket
 
 class Client(threading.Thread):
-    def __init__(self, gui, server_ip, server_port):
+    def __init__(self, server_ip, server_port):
         super().__init__(daemon=True)
-        self.gui = gui
+        self.protocol = Protocol('client', server_ip, server_port)
+        self.gui = None  # Will be set later
         self.pid = PID()
-        self.server_ip = server_ip
-        self.server_port = server_port
-        self.sock = None
-        self.aes_key = None
+        self.running = False
 
     def connect(self):
         while True:
             try:
-                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.sock.connect((self.server_ip, self.server_port))
-                print(f"Connected to remote processor at {self.server_ip}:{self.server_port}")
-                pubkey_len = struct.unpack('!I', self._recvall(4))[0]
-                pubkey = self._recvall(pubkey_len)
-                rsa_pub = RSA.import_key(pubkey)
-                rsa_cipher = PKCS1_OAEP.new(rsa_pub)
-                self.aes_key = Random.get_random_bytes(16)
-                enc_key = rsa_cipher.encrypt(self.aes_key)
-                self.sock.sendall(struct.pack('!I', len(enc_key)))
-                self.sock.sendall(enc_key)
-                print("Encryption handshake with server complete.")
+                self.protocol.connect()
                 break
             except (ConnectionRefusedError, socket.timeout) as e:
-                print(f"Connection failed, retrying... Error: {e}")
+                print(f"Connection failed: {e}. Retrying in 2 seconds...")
                 time.sleep(2)
 
-    def _recvall(self, count):
-        buf = b""
-        while count:
-            new = self.sock.recv(count)
-            if not new:
-                return None
-            buf += new
-            count -= len(new)
-        return buf
-
-    def _send_encrypted(self, data: bytes):
-        cipher = AES.new(self.aes_key, AES.MODE_EAX)
-        ciphertext, tag = cipher.encrypt_and_digest(data)
-        self.sock.sendall(struct.pack('!I', len(cipher.nonce)))
-        self.sock.sendall(cipher.nonce)
-        self.sock.sendall(struct.pack('!I', len(tag)))
-        self.sock.sendall(tag)
-        self.sock.sendall(struct.pack('!I', len(ciphertext)))
-        self.sock.sendall(ciphertext)
-
-    def _recv_encrypted(self) -> bytes:
-        nonce_len = struct.unpack('!I', self._recvall(4))[0]
-        nonce = self._recvall(nonce_len)
-        tag_len = struct.unpack('!I', self._recvall(4))[0]
-        tag = self._recvall(tag_len)
-        ct_len = struct.unpack('!I', self._recvall(4))[0]
-        ciphertext = self._recvall(ct_len)
-        cipher = AES.new(self.aes_key, AES.MODE_EAX, nonce=nonce)
-        return cipher.decrypt_and_verify(ciphertext, tag)
-
     def send_message(self, message: dict):
-        msg_bytes = json.dumps(message).encode()
-        self._send_encrypted(msg_bytes)
+        self.protocol.send_json(message)
 
     def recv_message(self) -> dict:
-        resp_bytes = self._recv_encrypted()
-        return json.loads(resp_bytes.decode())
+        return self.protocol.recv_json()
 
     def run(self):
+        self.running = True
         try:
-            while True:
-                payload = self._recv_encrypted()
-                h_len = struct.unpack('!I', payload[:4])[0]
-                header = json.loads(payload[4:4+h_len].decode())
-                frame_data = payload[4+h_len:]
-                frame = np.frombuffer(frame_data, dtype=np.dtype(header["dtype"]))
-                frame = frame.reshape(header["shape"])
-
+            while self.running:
+                frame = self.protocol.recv_frame()
                 mask = ImgUtils.threshold(frame)
                 warped = ImgUtils.warp(mask)
                 result = self.pid.process(warped)
@@ -100,13 +47,13 @@ class Client(threading.Thread):
                     lf = rf = 0
 
                 resp_dict = {
+                    "type": self.protocol.CMDS['PWM'],
                     "left_duty": left,
                     "right_duty": right,
                     "left_freq": lf,
                     "right_freq": rf
                 }
-                resp_bytes = (json.dumps(resp_dict) + "\n").encode()
-                self._send_encrypted(resp_bytes)
+                self.protocol.send_json(resp_dict)
 
                 mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
                 warped_bgr = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
@@ -118,16 +65,16 @@ class Client(threading.Thread):
                     f"Left Freq: {lf}, Right Freq: {rf}"
                 )
                 self.gui.update_gui(frame, mask_bgr, warped_bgr, pid_img, info)
-        except (ConnectionResetError, BrokenPipeError, socket.timeout) as e:
-            print(f"[Connection Error] {e}")
+        except Exception as e:
+            print(f"[Client Error] {e}")
+            self.running = False
         finally:
-            if self.sock:
-                self.sock.close()
+            self.protocol.close()
 
 def main():
     server_ip = "raspitwo.local"
     server_port = 8000
-    client = Client(None, server_ip, server_port)
+    client = Client(server_ip, server_port)
     client.connect()
 
     auth_window = AuthWindow(client)

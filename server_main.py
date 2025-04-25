@@ -1,123 +1,11 @@
 import cv2
 import numpy as np
 import time
-import socket
-import struct
-import json
 from picamera2 import Picamera2
 from car import MotorController
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_OAEP, AES
-from Crypto import Random
 from sqldb import UserDB
-
-class Server:
-    def __init__(self, host, port):
-        self.host = host
-        self.port = port
-        self.sock = None
-        self.conn = None
-        self.rsa_cipher = None
-        self.aes_key = None
-
-    def start(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind((self.host, self.port))
-        self.sock.listen(1)
-        print(f"Listening for remote processor on {self.host}:{self.port}...")
-        self.conn, addr = self.sock.accept()
-        print(f"Accepted connection from {addr}")
-
-        # Encryption handshake
-        rsa_key = RSA.generate(2048)
-        priv_key = rsa_key
-        pub_key = rsa_key.publickey().export_key()
-        self.conn.sendall(struct.pack('!I', len(pub_key)))
-        self.conn.sendall(pub_key)
-        self.rsa_cipher = PKCS1_OAEP.new(priv_key)
-        enc_key_len = struct.unpack('!I', self.conn.recv(4))[0]
-        enc_key = self._recvall(enc_key_len)
-        self.aes_key = self.rsa_cipher.decrypt(enc_key)
-        print("Encryption handshake complete.")
-
-        # Authentication loop
-        db = UserDB()
-        authenticated = False
-        while not authenticated:
-            request = self.recv_message()
-            if request["type"] == "signup":
-                username = request["username"]
-                password = request["password"]
-                age = request["age"]
-                if db.add_user(username, password, age):
-                    self.send_message({"status": "success"})
-                else:
-                    self.send_message({"status": "error", "message": "Username already exists"})
-            elif request["type"] == "login":
-                username = request["username"]
-                password = request["password"]
-                if db.verify_user(username, password):
-                    self.send_message({"status": "success"})
-                    authenticated = True
-                else:
-                    self.send_message({"status": "error", "message": "Invalid credentials"})
-            else:
-                self.send_message({"status": "error", "message": "Invalid request type"})
-        db.close()
-        print("Authentication successful. Starting main loop.")
-
-    def _recvall(self, count):
-        buf = b""
-        while count:
-            new = self.conn.recv(count)
-            if not new:
-                return None
-            buf += new
-            count -= len(new)
-        return buf
-
-    def _send_encrypted(self, data: bytes):
-        cipher = AES.new(self.aes_key, AES.MODE_EAX)
-        ciphertext, tag = cipher.encrypt_and_digest(data)
-        self.conn.sendall(struct.pack('!I', len(cipher.nonce)))
-        self.conn.sendall(cipher.nonce)
-        self.conn.sendall(struct.pack('!I', len(tag)))
-        self.conn.sendall(tag)
-        self.conn.sendall(struct.pack('!I', len(ciphertext)))
-        self.conn.sendall(ciphertext)
-
-    def _recv_encrypted(self) -> bytes:
-        nonce_len = struct.unpack('!I', self._recvall(4))[0]
-        nonce = self._recvall(nonce_len)
-        tag_len = struct.unpack('!I', self._recvall(4))[0]
-        tag = self._recvall(tag_len)
-        ct_len = struct.unpack('!I', self._recvall(4))[0]
-        ciphertext = self._recvall(ct_len)
-        cipher = AES.new(self.aes_key, AES.MODE_EAX, nonce=nonce)
-        return cipher.decrypt_and_verify(ciphertext, tag)
-
-    def send_message(self, message: dict):
-        msg_bytes = json.dumps(message).encode()
-        self._send_encrypted(msg_bytes)
-
-    def recv_message(self) -> dict:
-        resp_bytes = self._recv_encrypted()
-        return json.loads(resp_bytes.decode())
-
-    def send_frame(self, frame):
-        header = {"shape": frame.shape, "dtype": str(frame.dtype)}
-        header_bytes = json.dumps(header).encode('utf-8')
-        payload = struct.pack('!I', len(header_bytes)) + header_bytes + frame.tobytes()
-        self._send_encrypted(payload)
-        resp_data = self._recv_encrypted()
-        return json.loads(resp_data.decode('utf-8').strip())
-
-    def close(self):
-        if self.conn:
-            self.conn.close()
-        if self.sock:
-            self.sock.close()
+from protocol import Protocol, ConnectionClosedError
+import socket
 
 class CarController:
     def __init__(self):
@@ -135,6 +23,9 @@ class CarController:
         return frame
 
     def process_pwm_response(self, pwm):
+        if pwm.get("type") == Protocol.CMDS['STOP']:
+            print("Received STOP command")
+            return
         left_duty = pwm.get('left_duty', 0.07)
         right_duty = pwm.get('right_duty', 0.07)
         left_freq = pwm.get('left_freq', 50)
@@ -150,6 +41,10 @@ class CarController:
             print(f"PWM -> Ld: {left_duty:.3f}, Rd: {right_duty:.3f}, "
                   f"Lf: {left_freq}, Rf: {right_freq}")
 
+    def stop_car(self):
+        self.motor.stop()
+        print("Car stopped due to client disconnection")
+
     def cleanup(self):
         self.motor.stop()
         self.motor.cleanup()
@@ -158,31 +53,82 @@ class CarController:
 
 class CarRemoteServerApp:
     def __init__(self, host, port, frame_rate=20.0):
-        self.frame_period = 1.0 / frame_rate
-        self.server = Server(host, port)
+        self.protocol = Protocol('server', host, port)
         self.car = CarController()
+        self.frame_period = 1.0 / frame_rate
         self.running = False
 
     def run(self):
-        self.server.start()
-        self.running = True
-        try:
-            while self.running:
-                t0 = time.time()
-                frame = self.car.capture_frame()
-                pwm = self.server.send_frame(frame)
-                self.car.process_pwm_response(pwm)
-                elapsed = time.time() - t0
-                if elapsed < self.frame_period:
-                    time.sleep(self.frame_period - elapsed)
-        except KeyboardInterrupt:
-            print("Stopping by user interrupt.")
-        finally:
-            self.cleanup()
+        while True:
+            print("Waiting for a client connection...")
+            try:
+                self.protocol.accept()
+                print("Client connected. Starting authentication...")
 
-    def cleanup(self):
-        self.car.cleanup()
-        self.server.close()
+                # Authentication loop
+                db = UserDB()
+                authenticated = False
+                while not authenticated:
+                    try:
+                        request = self.protocol.recv_json()
+                        if request["type"] == Protocol.CMDS['SIGNUP']:
+                            username = request["username"]
+                            password = request["password"]
+                            age = request["age"]
+                            if db.add_user(username, password, age):
+                                self.protocol.send_json({"status": "success"})
+                                authenticated = True
+                            else:
+                                self.protocol.send_json({"status": "error", "message": "Username already exists"})
+                        elif request["type"] == Protocol.CMDS['LOGIN']:
+                            username = request["username"]
+                            password = request["password"]
+                            if db.verify_user(username, password):
+                                self.protocol.send_json({"status": "success"})
+                                authenticated = True
+                            else:
+                                self.protocol.send_json({"status": "error", "message": "Invalid credentials"})
+                        else:
+                            self.protocol.send_json({"status": "error", "message": "Invalid request type"})
+                    except (ConnectionResetError, BrokenPipeError, socket.timeout, ConnectionClosedError) as e:
+                        print(f"Authentication failed due to connection error: {e}")
+                        break
+                db.close()
+
+                if authenticated:
+                    print("Authentication successful. Starting main loop.")
+                    self.running = True
+                    try:
+                        while self.running:
+                            t0 = time.time()
+                            frame = self.car.capture_frame()
+                            self.protocol.send_frame(frame)
+                            pwm = self.protocol.recv_json()
+                            if pwm.get("type") == Protocol.CMDS['STOP']:
+                                print("Received STOP command. Stopping.")
+                                break
+                            self.car.process_pwm_response(pwm)
+                            elapsed = time.time() - t0
+                            if elapsed < self.frame_period:
+                                time.sleep(self.frame_period - elapsed)
+                    except (ConnectionResetError, BrokenPipeError, socket.timeout, ConnectionClosedError) as e:
+                        print(f"Client disconnected during main loop: {e}")
+                        self.car.stop_car()
+                        self.protocol.close()
+                        self.running = False
+                    except KeyboardInterrupt:
+                        print("Stopping by user interrupt.")
+                        self.running = False
+                    finally:
+                        self.car.stop_car()
+                        self.protocol.close()
+                else:
+                    print("Authentication failed. Waiting for a new client...")
+                    self.protocol.close()
+            except Exception as e:
+                print(f"Error accepting new connection: {e}")
+                self.protocol.close()
+                continue
 
 if __name__ == '__main__':
     HOST = '0.0.0.0'
