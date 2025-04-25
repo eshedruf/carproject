@@ -1,3 +1,5 @@
+# GUI for displaying video feed, PID graph, car IP, and debug data.
+
 import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk

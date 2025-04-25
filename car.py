@@ -1,3 +1,5 @@
+# Contains the MotorController class for controlling a robot car's motors.
+
 import RPi.GPIO as GPIO
 import time
 import threading

@@ -7,15 +7,12 @@ import numpy as np, cv2
 from image_utils import ImgUtils
 from pid_controller import PID
 from gui import GUI
-
-# --- ADDED FOR ENCRYPTION ---
+from auth_window import AuthWindow
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP, AES
 from Crypto import Random
-# ----------------------------
 
 class Client(threading.Thread):
-    """Client thread that receives images, processes them, and updates the GUI with encryption."""
     def __init__(self, gui, server_ip, server_port):
         super().__init__(daemon=True)
         self.gui = gui
@@ -26,23 +23,17 @@ class Client(threading.Thread):
         self.aes_key = None
 
     def connect(self):
-        """Establishes the TCP connection, retries if refused, then performs RSA/AES handshake."""
         while True:
             try:
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.sock.connect((self.server_ip, self.server_port))
                 print(f"Connected to remote processor at {self.server_ip}:{self.server_port}")
-
-                # --- ENCRYPTION HANDSHAKE ---
-                # Receive server's public key
                 pubkey_len = struct.unpack('!I', self._recvall(4))[0]
                 pubkey = self._recvall(pubkey_len)
                 rsa_pub = RSA.import_key(pubkey)
                 rsa_cipher = PKCS1_OAEP.new(rsa_pub)
-                # Generate AES session key
                 self.aes_key = Random.get_random_bytes(16)
                 enc_key = rsa_cipher.encrypt(self.aes_key)
-                # Send encrypted AES key
                 self.sock.sendall(struct.pack('!I', len(enc_key)))
                 self.sock.sendall(enc_key)
                 print("Encryption handshake with server complete.")
@@ -64,7 +55,6 @@ class Client(threading.Thread):
     def _send_encrypted(self, data: bytes):
         cipher = AES.new(self.aes_key, AES.MODE_EAX)
         ciphertext, tag = cipher.encrypt_and_digest(data)
-        # send nonce, tag, ciphertext
         self.sock.sendall(struct.pack('!I', len(cipher.nonce)))
         self.sock.sendall(cipher.nonce)
         self.sock.sendall(struct.pack('!I', len(tag)))
@@ -82,13 +72,18 @@ class Client(threading.Thread):
         cipher = AES.new(self.aes_key, AES.MODE_EAX, nonce=nonce)
         return cipher.decrypt_and_verify(ciphertext, tag)
 
+    def send_message(self, message: dict):
+        msg_bytes = json.dumps(message).encode()
+        self._send_encrypted(msg_bytes)
+
+    def recv_message(self) -> dict:
+        resp_bytes = self._recv_encrypted()
+        return json.loads(resp_bytes.decode())
+
     def run(self):
         try:
-            self.connect()
             while True:
-                # Receive encrypted payload
                 payload = self._recv_encrypted()
-                # Unpack header
                 h_len = struct.unpack('!I', payload[:4])[0]
                 header = json.loads(payload[4:4+h_len].decode())
                 frame_data = payload[4+h_len:]
@@ -111,10 +106,8 @@ class Client(threading.Thread):
                     "right_freq": rf
                 }
                 resp_bytes = (json.dumps(resp_dict) + "\n").encode()
-                # Send encrypted response
                 self._send_encrypted(resp_bytes)
 
-                # Update GUI
                 mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
                 warped_bgr = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
                 pid_img = self.gui.pid_graph.update(error, pid_out)
@@ -131,15 +124,23 @@ class Client(threading.Thread):
             if self.sock:
                 self.sock.close()
 
-
 def main():
-    gui = GUI()
     server_ip = "raspitwo.local"
     server_port = 8000
-    server = Client(gui, server_ip, server_port)
-    gui.server = server  # For PID reset access
-    server.start()
-    gui.mainloop()
+    client = Client(None, server_ip, server_port)
+    client.connect()
+
+    auth_window = AuthWindow(client)
+    auth_window.mainloop()
+
+    if auth_window.authenticated:
+        gui = GUI()
+        client.gui = gui
+        gui.server = client
+        client.start()
+        gui.mainloop()
+    else:
+        print("Authentication failed.")
 
 if __name__ == "__main__":
     main()

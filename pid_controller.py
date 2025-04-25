@@ -1,4 +1,8 @@
-# pid_controller.py
+# This module implements a PID controller for a self-driving car.
+# It computes the error, PID output, and motor duty cycles based on the processed image.
+# The PID controller is used to adjust the car's speed and direction based on the detected lane.
+# It also includes methods for determining the PWM frequency based on the duty cycle.
+
 import cv2
 
 class PID:
