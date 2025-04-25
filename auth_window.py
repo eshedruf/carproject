@@ -8,9 +8,28 @@ class AuthWindow(tk.Tk):
         self.geometry("300x200")
         self.client = client
         self.authenticated = False
-        self._build_widgets()
+        self._build_initial_widgets()
 
-    def _build_widgets(self):
+    def _build_initial_widgets(self):
+        self.message_label = tk.Label(self, text="Please choose an option:", fg="blue")
+        self.message_label.pack(pady=10)
+
+        tk.Button(self, text="Sign Up", command=self.show_signup).pack(pady=5)
+        tk.Button(self, text="Log In", command=self.show_login).pack(pady=5)
+
+    def show_signup(self):
+        self.clear_window()
+        self._build_signup_widgets()
+
+    def show_login(self):
+        self.clear_window()
+        self._build_login_widgets()
+
+    def clear_window(self):
+        for widget in self.winfo_children():
+            widget.destroy()
+
+    def _build_signup_widgets(self):
         tk.Label(self, text="Username:").pack()
         self.username_entry = tk.Entry(self)
         self.username_entry.pack()
@@ -19,12 +38,25 @@ class AuthWindow(tk.Tk):
         self.password_entry = tk.Entry(self, show='*')
         self.password_entry.pack()
 
-        tk.Label(self, text="Age (for signup):").pack()
+        tk.Label(self, text="Age:").pack()
         self.age_entry = tk.Entry(self)
         self.age_entry.pack()
 
-        tk.Button(self, text="Sign Up", command=self.signup).pack()
-        tk.Button(self, text="Log In", command=self.login).pack()
+        tk.Button(self, text="Submit Sign Up", command=self.signup).pack(pady=10)
+
+        self.message_label = tk.Label(self, text="", fg="red")
+        self.message_label.pack()
+
+    def _build_login_widgets(self):
+        tk.Label(self, text="Username:").pack()
+        self.username_entry = tk.Entry(self)
+        self.username_entry.pack()
+
+        tk.Label(self, text="Password:").pack()
+        self.password_entry = tk.Entry(self, show='*')
+        self.password_entry.pack()
+
+        tk.Button(self, text="Submit Log In", command=self.login).pack(pady=10)
 
         self.message_label = tk.Label(self, text="", fg="red")
         self.message_label.pack()
@@ -45,7 +77,8 @@ class AuthWindow(tk.Tk):
         self.client.send_message(request)
         response = self.client.recv_message()
         if response["status"] == "success":
-            self.message_label.config(text="Signup successful, please log in", fg="green")
+            self.authenticated = True
+            self.destroy()
         else:
             self.message_label.config(text=response["message"], fg="red")
 
