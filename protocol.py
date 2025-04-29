@@ -2,9 +2,12 @@ import socket
 import struct
 import json
 import numpy as np
+from typing import Optional
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP, AES
 from Crypto import Random
+
+MAX_CLIENTS = 1  # You can adjust this if needed
 
 class ConnectionClosedError(Exception):
     pass
@@ -17,15 +20,20 @@ class Protocol:
         'STOP': 'stop'
     }
 
-    def __init__(self, role: str, host: str, port: int):
+    def __init__(self, role: str, host: Optional[str], port: Optional[int],
+                 listen_sock: Optional[socket.socket] = None):
         self.role = role
-        self.host = host
-        self.port = port
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if role == 'server':
-            self.sock.bind((host, port))
-            self.sock.listen(1)
+        # If an existing listening socket is supplied, reuse it
+        if role == 'server' and listen_sock is not None:
+            self.sock = listen_sock
+        else:
+            self.host = host
+            self.port = port
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if role == 'server':
+                self.sock.bind((host, port))
+                self.sock.listen(MAX_CLIENTS)
         self.conn = None
         self.aes_key = None
 

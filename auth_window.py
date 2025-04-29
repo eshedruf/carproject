@@ -5,9 +5,10 @@ class AuthWindow(tk.Tk):
     def __init__(self, client):
         super().__init__()
         self.title("Authentication")
-        self.geometry("300x200")
+        self.geometry("600x400")
         self.client = client
         self.authenticated = False
+        self.role = None
         self._build_initial_widgets()
 
     def _build_initial_widgets(self):
@@ -68,16 +69,12 @@ class AuthWindow(tk.Tk):
         if not username or not password or not age:
             self.message_label.config(text="All fields are required for signup")
             return
-        try:
-            age = int(age)
-        except ValueError:
-            self.message_label.config(text="Age must be an integer")
-            return
         request = {"type": "signup", "username": username, "password": password, "age": age}
         self.client.send_message(request)
         response = self.client.recv_message()
         if response["status"] == "success":
             self.authenticated = True
+            self.role = "SPECTATOR"
             self.destroy()
         else:
             self.message_label.config(text=response["message"], fg="red")
@@ -93,6 +90,10 @@ class AuthWindow(tk.Tk):
         response = self.client.recv_message()
         if response["status"] == "success":
             self.authenticated = True
+            if username == "admin" and password == "admin":
+                self.role = "ADMIN"
+            else:
+                self.role = "SPECTATOR"
             self.destroy()
         else:
             self.message_label.config(text=response["message"], fg="red")

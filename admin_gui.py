@@ -94,15 +94,13 @@ class GUI(tk.Tk):
     
     def resize_with_aspect_ratio(self, image, target_width, target_height):
         """Resize image to fit within target_width x target_height while maintaining 640:380 ratio."""
-        aspect_ratio = 640 / 380  # Desired aspect ratio
+        aspect_ratio = 640 / 380
         target_aspect = target_width / target_height
         
         if target_aspect > aspect_ratio:
-            # Target is wider, so height is the limiting factor
             new_h = target_height
             new_w = int(new_h * aspect_ratio)
         else:
-            # Target is taller, so width is the limiting factor
             new_w = target_width
             new_h = int(new_w / aspect_ratio)
         
@@ -111,37 +109,30 @@ class GUI(tk.Tk):
     
     def update_gui(self, orig_img, mask_img, warped_img, pid_img, info_str):
         """Update the four images and debug info with 640:380 aspect ratio preservation."""
-        # Get current size of the labels (assumed same due to packing)
         label_width = self.orig_lbl.winfo_width()
         label_height = self.orig_lbl.winfo_height()
         
-        # Only update if labels have a valid size (avoids initial 1x1 size)
         if label_width > 1 and label_height > 1:
-            # Resize each image with aspect ratio preservation
             orig_resized = self.resize_with_aspect_ratio(orig_img, label_width, label_height)
             mask_resized = self.resize_with_aspect_ratio(mask_img, label_width, label_height)
             warped_resized = self.resize_with_aspect_ratio(warped_img, label_width, label_height)
             pid_resized = self.resize_with_aspect_ratio(pid_img, label_width, label_height)
             
-            # Convert all images from BGR to RGB for Tkinter
             orig_resized = cv2.cvtColor(orig_resized, cv2.COLOR_BGR2RGB)
             mask_resized = cv2.cvtColor(mask_resized, cv2.COLOR_BGR2RGB)
             warped_resized = cv2.cvtColor(warped_resized, cv2.COLOR_BGR2RGB)
             pid_resized = cv2.cvtColor(pid_resized, cv2.COLOR_BGR2RGB)
             
-            # Create PhotoImage objects
             self.orig_photo = ImageTk.PhotoImage(image=Image.fromarray(orig_resized))
             self.mask_photo = ImageTk.PhotoImage(image=Image.fromarray(mask_resized))
             self.warped_photo = ImageTk.PhotoImage(image=Image.fromarray(warped_resized))
             self.pid_photo = ImageTk.PhotoImage(image=Image.fromarray(pid_resized))
             
-            # Update the labels with the new images
             self.orig_lbl.config(image=self.orig_photo)
             self.mask_lbl.config(image=self.mask_photo)
             self.warped_lbl.config(image=self.warped_photo)
             self.pid_lbl.config(image=self.pid_photo)
         
-        # Update the debug info
         self.info.set(info_str)
     
     def stop(self):
