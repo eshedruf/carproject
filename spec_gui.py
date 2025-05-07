@@ -1,66 +1,69 @@
 import tkinter as tk
+from tkinter import ttk
 from PIL import Image, ImageTk
 import cv2
-import queue
+import numpy as np
 
 class SpectatorGUI(tk.Tk):
-    """Simple GUI that displays only the raw camera feed for spectators."""
-    def __init__(self, frame_queue):
+    def __init__(self):
         super().__init__()
-        self.title("Car Viewer")
-        self.geometry("800x500")
-        self.configure(bg="black")
+        self.title("Spectator View")
+        self.geometry("1200x800")
+        self.configure(bg="white")
 
+        # Same StringVars as AdminGUI
         self.car_ip = tk.StringVar(value="Car IP: Not connected")
-        self.frame_queue = frame_queue
+        self.info   = tk.StringVar()
+        self.control_flags = {}   # just for compatibility
+        self.server = None        # filled in by client_main
+
+        # Dummy PID-graph so client.pid_graph.update(...) won’t crash
+        self.pid_graph = type("Stub", (), {
+            "update": lambda *args, **kwargs: np.zeros((380, 640, 3), dtype=np.uint8)
+        })()
 
         self._build_widgets()
-        self._check_queue()
 
     def _build_widgets(self):
-        # Top frame for IP display
-        top_frame = tk.Frame(self, bg="black")
-        top_frame.pack(side=tk.TOP, fill=tk.X)
-        ip_lbl = tk.Label(top_frame, textvariable=self.car_ip,
-                          fg="white", bg="black", font=("Arial", 12))
-        ip_lbl.pack(side=tk.LEFT, padx=10, pady=5)
+        top = ttk.Frame(self)
+        top.pack(pady=5, fill=tk.X)
 
-        # Middle frame for video
-        mid_frame = tk.Frame(self, bg="black")
-        mid_frame.pack(expand=True, fill=tk.BOTH)
-        self.video_lbl = tk.Label(mid_frame, bg="black")
-        self.video_lbl.pack(expand=True, fill=tk.BOTH)
+        ttk.Label(top, textvariable=self.car_ip, font=("Helvetica",12)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(top, text="Close", command=self.destroy).pack(side=tk.RIGHT, padx=5)
 
-    def _check_queue(self):
-        # Poll the queue for new frames
-        try:
-            while True:
-                frame = self.frame_queue.get_nowait()
-                self._display_frame(frame)
-        except queue.Empty:
-            pass
-        # Check again after 10ms
-        self.after(10, self._check_queue)
+        # Only one large label for the camera feed
+        self.orig_lbl = tk.Label(self)
+        self.orig_lbl.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
 
-    def _display_frame(self, frame):
-        # Resize frame to label size while keeping aspect ratio
-        w = self.video_lbl.winfo_width()
-        h = self.video_lbl.winfo_height()
+        bot = ttk.Frame(self)
+        bot.pack(pady=5, fill=tk.X)
+        tk.Label(bot, textvariable=self.info, font=("Helvetica",12), fg="blue").pack()
+
+    def resize_with_aspect_ratio(self, image, target_w, target_h):
+        aspect = 640 / 380
+        if (target_w / target_h) > aspect:
+            nh = target_h
+            nw = int(nh * aspect)
+        else:
+            nw = target_w
+            nh = int(nw / aspect)
+        return cv2.resize(image, (nw, nh))
+
+    def update_gui(self, orig_img, mask_img, warped_img, pid_img, info_str):
+        """
+        Signature matches AdminGUI.update_gui:
+          orig_img, mask_img, warped_img, pid_img, info_str
+        We only display orig_img + info_str.
+        """
+        w = self.orig_lbl.winfo_width()
+        h = self.orig_lbl.winfo_height()
         if w > 1 and h > 1:
-            aspect = frame.shape[1] / frame.shape[0]
-            if w / aspect <= h:
-                new_w = w
-                new_h = int(w / aspect)
-            else:
-                new_h = h
-                new_w = int(h * aspect)
-            resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            # Convert BGR to RGB for Tkinter
-            img = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(img)
-            photo = ImageTk.PhotoImage(img)
-            self.video_lbl.config(image=photo)
-            self.video_lbl.image = photo  # keep a reference
+            img = self.resize_with_aspect_ratio(orig_img, w, h)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            self.photo = ImageTk.PhotoImage(Image.fromarray(img))
+            self.orig_lbl.config(image=self.photo)
 
-    def set_car_ip(self, ip: str):
+        self.info.set(info_str)
+
+    def set_car_ip(self, ip):
         self.car_ip.set(f"Car IP: {ip}")

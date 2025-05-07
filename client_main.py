@@ -8,7 +8,6 @@ from admin_gui import GUI as AdminGUI
 from spec_gui import SpectatorGUI
 from auth_window import AuthWindow
 from protocol import Protocol
-from queue import Queue
 import socket
 
 class Client(threading.Thread):
@@ -18,7 +17,6 @@ class Client(threading.Thread):
         self.gui = None
         self.pid = PID()
         self.running = False
-        self.frame_queue = None  # set for spectators
 
     def connect(self):
         while True:
@@ -43,12 +41,7 @@ class Client(threading.Thread):
             while self.running:
                 frame = self.protocol.recv_frame()
 
-                # Spectator mode: queue frames for GUI
-                if self.frame_queue is not None:
-                    self.frame_queue.put(frame)
-                    continue
-
-                # Admin mode: process and control
+                # Process frame (regardless of role)
                 mask = ImgUtils.threshold(frame)
                 warped = ImgUtils.warp(mask)
                 (error, pid_out,
@@ -56,6 +49,7 @@ class Client(threading.Thread):
                  lf, rf,
                  derivative, integral, prev_error) = self.pid.process(warped)
 
+                # Admin controls PWM; spectator just ignores stop/continue flags
                 if self.gui.control_flags.get("stopped", False):
                     left = right = 0.0
                     lf = rf = 0
@@ -69,15 +63,19 @@ class Client(threading.Thread):
                 }
                 self.protocol.send_json(pwm)
 
+                # Prepare images for GUI
                 mask_bgr   = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
                 warped_bgr = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
                 pid_img    = self.gui.pid_graph.update(error, pid_out)
+
                 info = (
                     f"Err: {error:.2f} | PID: {pid_out:.4f}\n"
                     f"I: {integral:.4f}  D: {derivative:.4f}\n"
                     f"Ld:{left:.3f}  Rd:{right:.3f} | "
                     f"Lf:{lf}  Rf:{rf}"
                 )
+
+                # Update whichever GUI (Admin or Spectator)
                 self.gui.update_gui(frame, mask_bgr, warped_bgr, pid_img, info)
 
         except Exception as e:
@@ -96,27 +94,22 @@ def main():
         print("Authentication failed or cancelled")
         return
 
-    # Prepare spectator frame queue
-    frame_queue = Queue()
-
     # Pick the right GUI
     if getattr(auth_win, 'role', None) == "ADMIN":
         gui = AdminGUI()
     else:
-        gui = SpectatorGUI(frame_queue)
-        client.frame_queue = frame_queue
+        gui = SpectatorGUI()
 
-    # Wire up the client → GUI
+    # Wire up client ↔ GUI
     client.gui = gui
     gui.server = client
 
-    # **Here’s the crucial bit: tell the GUI what IP it’s looking at**
+    # Display the car’s IP in the GUI
     gui.set_car_ip(f"{client.protocol.host}:{client.protocol.port}")
 
-    # Now start the client thread and enter the GUI loop
+    # Start processing thread and launch GUI loop
     client.start()
     gui.mainloop()
-
 
 if __name__ == "__main__":
     main()

@@ -8,11 +8,10 @@ from car import MotorController
 from sqldb import UserDB
 from protocol import Protocol, ConnectionClosedError
 
-MAX_CLIENTS = 3
-FRAME_RATE = 20.0
-
-ADMIN_USER = 'admin'
-ADMIN_PASS = 'admin'
+MAX_CLIENTS   = 3
+FRAME_RATE    = 20.0
+ADMIN_USER    = 'admin'
+ADMIN_PASS    = 'admin'
 
 class CarController:
     def __init__(self):
@@ -29,20 +28,26 @@ class CarController:
         return cv2.rotate(frame, cv2.ROTATE_180)
 
     def process_pwm(self, pwm):
-        if pwm.get("type") == Protocol.CMDS['STOP']:
+        t = pwm.get("type")
+        if t == Protocol.CMDS['STOP']:
             self.motor.stop()
-            print("[ADMIN] STOP command processed")
+            print("[ADMIN] STOP")
             return
-        left = pwm.get('left_duty', 0.0)
+
+        left  = pwm.get('left_duty',  0.0)
         right = pwm.get('right_duty', 0.0)
-        lf = pwm.get('left_freq', 50)
-        rf = pwm.get('right_freq', 50)
+        lf    = pwm.get('left_freq', 50)
+        rf    = pwm.get('right_freq',50)
+
         if left == 0.0 and right == 0.0:
             self.motor.stop()
             print("[ADMIN] Motors stopped")
         else:
-            self.motor.move_forward(left_duty=left, right_duty=right, left_freq=lf, right_freq=rf)
-            print(f"[ADMIN] Motors -> Ld:{left:.3f}, Rd:{right:.3f}")
+            self.motor.move_forward(
+                left_duty=left, right_duty=right,
+                left_freq=lf, right_freq=rf
+            )
+            print(f"[ADMIN] Ld:{left:.3f} Rd:{right:.3f}")
 
     def cleanup(self):
         self.motor.stop()
@@ -56,85 +61,88 @@ class CarRemoteServerApp:
         self.listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listen_sock.bind((host, port))
         self.listen_sock.listen(MAX_CLIENTS)
-        print(f"Listening on {host}:{port} (admin + {MAX_CLIENTS-1} spectators)")
+        print(f"Listening on {host}:{port} (1 admin + {MAX_CLIENTS-1} spectators)")
 
-        self.car = CarController()
-        self.frame_period = 1.0 / FRAME_RATE
-        self.lock = threading.Lock()
-        self.active = 0
-        self.admin_present = False
+        self.car            = CarController()
+        self.frame_period   = 1.0 / FRAME_RATE
+        self.lock           = threading.Lock()
+        self.clients        = []         # list of Protocol objects
+        self.admin_protocol = None       # the one admin socket
+        self.running        = True
 
     def run(self):
+        # Start broadcasting frames to all clients
+        threading.Thread(target=self._broadcast_frames, daemon=True).start()
+
         try:
-            while True:
+            while self.running:
                 conn, addr = self.listen_sock.accept()
                 print(f"Incoming connection from {addr}")
-                with self.lock:
-                    if self.active >= MAX_CLIENTS:
-                        print("Server full, closing connection silently")
-                        conn.close()
-                        continue
-                    self.active += 1
-                threading.Thread(target=self._handle_client, args=(conn, addr), daemon=True).start()
+                threading.Thread(
+                    target=self._handle_client,
+                    args=(conn, addr),
+                    daemon=True
+                ).start()
         except KeyboardInterrupt:
             print("Shutting down server")
         finally:
+            self.running = False
             self.car.cleanup()
             self.listen_sock.close()
 
     def _handle_client(self, sock, addr):
         protocol = Protocol('server', None, None, listen_sock=self.listen_sock)
         protocol.conn = sock
+
+        # Encryption handshake
         try:
             protocol._perform_encryption_handshake()
         except ConnectionClosedError:
-            self._cleanup(is_admin=False)
             return
 
         db = UserDB()
-        auth = False
-        is_admin = False
         try:
+            # --- AUTH ---
+            auth = False
+            is_admin = False
             while not auth:
                 req = protocol.recv_json()
-                username = req.get('username')
-                password = req.get('password')
-                req_type = req.get('type')
+                u, p, t = req.get('username'), req.get('password'), req.get('type')
 
-                if req_type == Protocol.CMDS['SIGNUP']:
-                    if username == ADMIN_USER:
-                        protocol.send_json({"status": "error", "message": "Cannot signup as admin"})
-                        raise ConnectionClosedError("Admin signup blocked")
-                    ok = db.add_user(username, password, req['age'])
-                    protocol.send_json({"status": "success"} if ok else {"status": "error", "message": "Username exists"})
+                if t == Protocol.CMDS['SIGNUP']:
+                    if u == ADMIN_USER:
+                        protocol.send_json({"status":"error","message":"Cannot signup as admin"})
+                        raise ConnectionClosedError()
+                    ok = db.add_user(u, p, req.get('age'))
+                    protocol.send_json({"status":"success"} if ok else {"status":"error","message":"Username exists"})
                     auth = ok
 
-                elif req_type == Protocol.CMDS['LOGIN']:
-                    if username == ADMIN_USER:
-                        if password == ADMIN_PASS:
+                elif t == Protocol.CMDS['LOGIN']:
+                    if u == ADMIN_USER:
+                        # Admin login
+                        if p == ADMIN_PASS:
                             with self.lock:
-                                if not self.admin_present:
-                                    self.admin_present = True
+                                if self.admin_protocol is None:
+                                    self.admin_protocol = protocol
                                     is_admin = True
-                                    protocol.send_json({"status": "success"})
                                     auth = True
+                                    protocol.send_json({"status":"success"})
                                 else:
-                                    protocol.send_json({"status": "error", "message": "Admin already connected"})
-                                    raise ConnectionClosedError("Admin already present")
+                                    protocol.send_json({"status":"error","message":"Admin already connected"})
+                                    raise ConnectionClosedError()
                         else:
-                            protocol.send_json({"status": "error", "message": "Invalid admin credentials"})
-                            raise ConnectionClosedError("Bad admin login")
+                            protocol.send_json({"status":"error","message":"Invalid admin credentials"})
+                            raise ConnectionClosedError()
                     else:
-                        ok = db.verify_user(username, password)
-                        protocol.send_json({"status": "success"} if ok else {"status": "error", "message": "Invalid credentials"})
+                        # Spectator login
+                        ok = db.verify_user(u, p)
+                        protocol.send_json({"status":"success"} if ok else {"status":"error","message":"Invalid credentials"})
                         auth = ok
                 else:
-                    protocol.send_json({"status": "error", "message": "Invalid request"})
-        except Exception as e:
-            print(f"Auth failed ({addr}): {e}")
+                    protocol.send_json({"status":"error","message":"Invalid request"})
+        except ConnectionClosedError:
+            print(f"Auth failed for {addr}")
             protocol.close()
-            db.close()
-            self._cleanup(is_admin)
             return
         finally:
             db.close()
@@ -142,66 +150,58 @@ class CarRemoteServerApp:
         role = "ADMIN" if is_admin else "SPECTATOR"
         print(f"{role} {addr} authenticated")
 
-        try:
-            if is_admin:
-                self._admin_loop(protocol)
-            else:
-                self._spectator_loop(protocol)
-        finally:
-            protocol.close()
-            print(f"{role} {addr} disconnected")
-            self._cleanup(is_admin)
+        # Add to broadcast list
+        with self.lock:
+            self.clients.append(protocol)
 
-    def _admin_loop(self, protocol):
-        while True:
+        if is_admin:
+            # Only admin socket reads commands
+            try:
+                while self.running:
+                    cmd = protocol.recv_json()    # blocks until admin sends
+                    self.car.process_pwm(cmd)
+            except ConnectionClosedError:
+                pass
+            finally:
+                print("Admin disconnected, stopping car")
+                self.car.motor.stop()
+        else:
+            # Spectator: just stay alive until disconnect
+            try:
+                while self.running:
+                    time.sleep(1)
+            except:
+                pass
+
+        # Cleanup on disconnect
+        protocol.close()
+        with self.lock:
+            if protocol in self.clients:
+                self.clients.remove(protocol)
+            if protocol is self.admin_protocol:
+                self.admin_protocol = None
+        print(f"{role} {addr} disconnected")
+
+    def _broadcast_frames(self):
+        """Continuously capture & send frames to every client."""
+        while self.running:
             t0 = time.time()
             frame = self.car.capture_frame()
-            protocol.send_frame(frame)
-            try:
-                pwm = protocol.recv_json()
-            except ConnectionClosedError:
-                break
-            self.car.process_pwm(pwm)
+
+            with self.lock:
+                targets = list(self.clients)
+
+            for prot in targets:
+                try:
+                    prot.send_frame(frame)
+                except Exception:
+                    with self.lock:
+                        if prot in self.clients:
+                            self.clients.remove(prot)
+
             dt = time.time() - t0
             if dt < self.frame_period:
                 time.sleep(self.frame_period - dt)
-
-    def _spectator_loop(self, protocol):
-        """
-        Spectator clients: ignore any incoming commands,
-        then capture & send frames continuously until they disconnect.
-        """
-        sock = protocol.conn
-        sock.settimeout(0.1)
-
-        while True:
-            # Drain and ignore any spectator commands
-            try:
-                while True:
-                    cmd = protocol.recv_json()
-                    print(f"[SPECTATOR] Ignored command: {cmd.get('type')}")
-            except (socket.timeout, ConnectionClosedError):
-                pass
-
-            # Capture a camera frame and send it
-            try:
-                frame = self.car.capture_frame()
-                protocol.send_frame(frame)
-            except (ConnectionClosedError, TimeoutError):
-                # Client has disconnected or timed out—exit cleanly
-                break
-
-            # Pace the loop to FRAME_RATE
-            time.sleep(self.frame_period)
-
-
-    def _cleanup(self, is_admin):
-        with self.lock:
-            self.active -= 1
-            if is_admin:
-                self.admin_present = False
-                self.car.motor.stop()
-                print("[SERVER] Admin disconnected—car stopped")
 
 if __name__ == "__main__":
     app = CarRemoteServerApp('0.0.0.0', 8000)
