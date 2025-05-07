@@ -191,23 +191,26 @@ class CarRemoteServerApp:
         print(("ADMIN" if is_admin else "SPECTATOR"), f"{addr} disconnected")
 
     def _broadcast_frames(self):
-        """Continuously capture & send frames to every registered client via UDP."""
+        self.udp_socket.setblocking(False)  # avoid blocking on slow clients
         while self.running:
             t0 = time.time()
             frame = self.car.capture_frame()
-            # Encode frame as JPEG
             ret, encoded = cv2.imencode(".jpg", frame)
             if not ret:
+                print("[ERROR] Frame encoding failed")
                 continue
-            data = encoded.tobytes()
 
+            data = encoded.tobytes()
             with self.lock:
                 targets = [prot for prot in self.clients if hasattr(prot, "udp_addr")]
 
             for prot in targets:
                 try:
                     self.udp_socket.sendto(data, prot.udp_addr)
-                except Exception:
+                except (BlockingIOError, OSError):
+                    print(f"[WARNING] Dropping frame for {prot.udp_addr}")
+                except Exception as e:
+                    print(f"[ERROR] Failed to send frame to {prot.udp_addr}: {e}")
                     with self.lock:
                         if prot in self.clients:
                             self.clients.remove(prot)
