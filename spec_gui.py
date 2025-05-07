@@ -62,6 +62,7 @@ class SpectatorGUI(tk.Tk):
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             self.photo = ImageTk.PhotoImage(Image.fromarray(img))
             self.orig_lbl.config(image=self.photo)
+            self.orig_lbl.image = self.photo  # keep reference to avoid flickering
 
         self.info.set(info_str)
 

@@ -129,9 +129,13 @@ class GUI(tk.Tk):
             self.pid_photo = ImageTk.PhotoImage(image=Image.fromarray(pid_resized))
             
             self.orig_lbl.config(image=self.orig_photo)
+            self.orig_lbl.image = self.orig_photo  # keep reference to avoid flickering
             self.mask_lbl.config(image=self.mask_photo)
+            self.mask_lbl.image = self.mask_photo
             self.warped_lbl.config(image=self.warped_photo)
+            self.warped_lbl.image = self.warped_photo
             self.pid_lbl.config(image=self.pid_photo)
+            self.pid_lbl.image = self.pid_photo
         
         self.info.set(info_str)
     

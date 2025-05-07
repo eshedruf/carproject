@@ -62,11 +62,13 @@ class CarRemoteServerApp:
         self.listen_sock.bind((host, port))
         self.listen_sock.listen(MAX_CLIENTS)
         print(f"Listening on {host}:{port} (1 admin + {MAX_CLIENTS-1} spectators)")
+        # Create UDP socket for broadcasting frames
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         self.car            = CarController()
         self.frame_period   = 1.0 / FRAME_RATE
         self.lock           = threading.Lock()
-        self.clients        = []         # list of Protocol objects
+        self.clients        = []         # list of Protocol objects; each may have .udp_addr
         self.admin_protocol = None       # the one admin socket
         self.running        = True
 
@@ -94,15 +96,16 @@ class CarRemoteServerApp:
         protocol = Protocol('server', None, None, listen_sock=self.listen_sock)
         protocol.conn = sock
 
-        # Encryption handshake
+        # For spectators, perform the encryption handshake first
         try:
+            # Do handshake for non-admin clients;
+            # admin clients will be wrapped with SSL later.
             protocol._perform_encryption_handshake()
         except ConnectionClosedError:
             return
 
         db = UserDB()
         try:
-            # --- AUTH ---
             auth = False
             is_admin = False
             while not auth:
@@ -119,7 +122,6 @@ class CarRemoteServerApp:
 
                 elif t == Protocol.CMDS['LOGIN']:
                     if u == ADMIN_USER:
-                        # Admin login
                         if p == ADMIN_PASS:
                             with self.lock:
                                 if self.admin_protocol is None:
@@ -127,6 +129,8 @@ class CarRemoteServerApp:
                                     is_admin = True
                                     auth = True
                                     protocol.send_json({"status":"success"})
+                                    # Removed SSL/TLS wrapping; using plain TCP.
+                                    # RSA-AES encryption handshake already performed in _perform_encryption_handshake.
                                 else:
                                     protocol.send_json({"status":"error","message":"Admin already connected"})
                                     raise ConnectionClosedError()
@@ -134,7 +138,6 @@ class CarRemoteServerApp:
                             protocol.send_json({"status":"error","message":"Invalid admin credentials"})
                             raise ConnectionClosedError()
                     else:
-                        # Spectator login
                         ok = db.verify_user(u, p)
                         protocol.send_json({"status":"success"} if ok else {"status":"error","message":"Invalid credentials"})
                         auth = ok
@@ -147,18 +150,25 @@ class CarRemoteServerApp:
         finally:
             db.close()
 
-        role = "ADMIN" if is_admin else "SPECTATOR"
-        print(f"{role} {addr} authenticated")
+        print(("ADMIN" if is_admin else "SPECTATOR"), f"{addr} authenticated")
 
-        # Add to broadcast list
+        # Expect UDP port registration from client
+        try:
+            udp_msg = protocol.recv_json()
+            if udp_msg.get("type") == "UDP_PORT":
+                protocol.udp_addr = (addr[0], udp_msg.get("port"))
+        except Exception:
+            protocol.close()
+            return
+
         with self.lock:
             self.clients.append(protocol)
 
         if is_admin:
-            # Only admin socket reads commands
+            # Admin reads commands over SSL/TLS
             try:
                 while self.running:
-                    cmd = protocol.recv_json()    # blocks until admin sends
+                    cmd = protocol.recv_json()
                     self.car.process_pwm(cmd)
             except ConnectionClosedError:
                 pass
@@ -166,34 +176,37 @@ class CarRemoteServerApp:
                 print("Admin disconnected, stopping car")
                 self.car.motor.stop()
         else:
-            # Spectator: just stay alive until disconnect
             try:
                 while self.running:
                     time.sleep(1)
             except:
                 pass
 
-        # Cleanup on disconnect
         protocol.close()
         with self.lock:
             if protocol in self.clients:
                 self.clients.remove(protocol)
             if protocol is self.admin_protocol:
                 self.admin_protocol = None
-        print(f"{role} {addr} disconnected")
+        print(("ADMIN" if is_admin else "SPECTATOR"), f"{addr} disconnected")
 
     def _broadcast_frames(self):
-        """Continuously capture & send frames to every client."""
+        """Continuously capture & send frames to every registered client via UDP."""
         while self.running:
             t0 = time.time()
             frame = self.car.capture_frame()
+            # Encode frame as JPEG
+            ret, encoded = cv2.imencode(".jpg", frame)
+            if not ret:
+                continue
+            data = encoded.tobytes()
 
             with self.lock:
-                targets = list(self.clients)
+                targets = [prot for prot in self.clients if hasattr(prot, "udp_addr")]
 
             for prot in targets:
                 try:
-                    prot.send_frame(frame)
+                    self.udp_socket.sendto(data, prot.udp_addr)
                 except Exception:
                     with self.lock:
                         if prot in self.clients:

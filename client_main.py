@@ -17,6 +17,10 @@ class Client(threading.Thread):
         self.gui = None
         self.pid = PID()
         self.running = False
+        # Create UDP socket and bind to an available port
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_socket.bind(('', 0))
+        self.udp_port = self.udp_socket.getsockname()[1]
 
     def connect(self):
         while True:
@@ -39,9 +43,10 @@ class Client(threading.Thread):
         self.running = True
         try:
             while self.running:
-                frame = self.protocol.recv_frame()
+                # Receive UDP datagram for JPEG-encoded frame
+                data, _ = self.udp_socket.recvfrom(65535)
+                frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
 
-                # Process frame (regardless of role)
                 mask = ImgUtils.threshold(frame)
                 warped = ImgUtils.warp(mask)
                 (error, pid_out,
@@ -49,7 +54,6 @@ class Client(threading.Thread):
                  lf, rf,
                  derivative, integral, prev_error) = self.pid.process(warped)
 
-                # Admin controls PWM; spectator just ignores stop/continue flags
                 if self.gui.control_flags.get("stopped", False):
                     left = right = 0.0
                     lf = rf = 0
@@ -63,7 +67,6 @@ class Client(threading.Thread):
                 }
                 self.protocol.send_json(pwm)
 
-                # Prepare images for GUI
                 mask_bgr   = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
                 warped_bgr = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
                 pid_img    = self.gui.pid_graph.update(error, pid_out)
@@ -74,10 +77,7 @@ class Client(threading.Thread):
                     f"Ld:{left:.3f}  Rd:{right:.3f} | "
                     f"Lf:{lf}  Rf:{rf}"
                 )
-
-                # Update whichever GUI (Admin or Spectator)
                 self.gui.update_gui(frame, mask_bgr, warped_bgr, pid_img, info)
-
         except Exception as e:
             print(f"Client error: {e}")
         finally:
@@ -94,20 +94,19 @@ def main():
         print("Authentication failed or cancelled")
         return
 
-    # Pick the right GUI
+    # Send UDP port registration to server
+    client.protocol.send_json({"type": "UDP_PORT", "port": client.udp_port})
+
     if getattr(auth_win, 'role', None) == "ADMIN":
         gui = AdminGUI()
     else:
         gui = SpectatorGUI()
 
-    # Wire up client ↔ GUI
     client.gui = gui
     gui.server = client
 
-    # Display the car’s IP in the GUI
     gui.set_car_ip(f"{client.protocol.host}:{client.protocol.port}")
 
-    # Start processing thread and launch GUI loop
     client.start()
     gui.mainloop()
 
