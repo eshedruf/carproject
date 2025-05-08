@@ -1,156 +1,53 @@
+import socket
+import threading
+import time
 import cv2
 import numpy as np
-import time
-import socket
-import struct
-import json
 from picamera2 import Picamera2
 from car import MotorController
+from sqldb import UserDB
+from protocol import Protocol, ConnectionClosedError
 
-# --- ADDED FOR ENCRYPTION ---
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_OAEP, AES
-from Crypto import Random
-# ----------------------------
-
-class PiServer:
-    """
-    This class handles the server side of the connection.
-    It listens for a client (remote processor), sends camera frames,
-    and receives JSON responses with PWM values.
-    """
-    def __init__(self, host, port):
-        self.host = host
-        self.port = port
-        self.sock = None
-        self.conn = None
-
-        # Encryption placeholders
-        self.rsa_cipher = None
-        self.aes_key = None
-
-    def start(self):
-        """Bind, listen, accept client, and perform RSA/AES handshake."""
-        # --- ORIGINAL BIND/LISTEN ---
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind((self.host, self.port))
-        self.sock.listen(1)
-        print(f"Listening for remote processor on {self.host}:{self.port}...")
-        self.conn, addr = self.sock.accept()
-        print(f"Accepted connection from {addr}")
-
-        # --- ENCRYPTION HANDSHAKE ---
-        # Generate RSA key pair
-        rsa_key = RSA.generate(2048)
-        priv_key = rsa_key
-        pub_key = rsa_key.publickey().export_key()
-        # Send server's public key
-        self.conn.sendall(struct.pack('!I', len(pub_key)))
-        self.conn.sendall(pub_key)
-        # Prepare to decrypt AES key
-        self.rsa_cipher = PKCS1_OAEP.new(priv_key)
-        # Receive encrypted AES key
-        enc_key_len = struct.unpack('!I', self.conn.recv(4))[0]
-        enc_key = self._recvall(enc_key_len)
-        self.aes_key = self.rsa_cipher.decrypt(enc_key)
-        print("Encryption handshake complete.")
-
-    def _recvall(self, count):
-        buf = b""
-        while count:
-            new = self.conn.recv(count)
-            if not new:
-                return None
-            buf += new
-            count -= len(new)
-        return buf
-
-    def _send_encrypted(self, data: bytes):
-        cipher = AES.new(self.aes_key, AES.MODE_EAX)
-        ciphertext, tag = cipher.encrypt_and_digest(data)
-        # send nonce, tag, ciphertext lengths and data
-        self.conn.sendall(struct.pack('!I', len(cipher.nonce)))
-        self.conn.sendall(cipher.nonce)
-        self.conn.sendall(struct.pack('!I', len(tag)))
-        self.conn.sendall(tag)
-        self.conn.sendall(struct.pack('!I', len(ciphertext)))
-        self.conn.sendall(ciphertext)
-
-    def _recv_encrypted(self) -> bytes:
-        nonce_len = struct.unpack('!I', self._recvall(4))[0]
-        nonce = self._recvall(nonce_len)
-        tag_len = struct.unpack('!I', self._recvall(4))[0]
-        tag = self._recvall(tag_len)
-        ct_len = struct.unpack('!I', self._recvall(4))[0]
-        ciphertext = self._recvall(ct_len)
-        cipher = AES.new(self.aes_key, AES.MODE_EAX, nonce=nonce)
-        return cipher.decrypt_and_verify(ciphertext, tag)
-
-    def send_frame(self, frame):
-        """
-        Sends the frame encrypted with AES, then receives the encrypted JSON response.
-        """
-        # Header with shape and dtype
-        header = {"shape": frame.shape, "dtype": str(frame.dtype)}
-        header_bytes = json.dumps(header).encode('utf-8')
-
-        # Raw frame data
-        raw = frame.tobytes()
-
-        # Prepare payload: header length + header + raw data
-        payload = struct.pack('!I', len(header_bytes)) + header_bytes + raw
-
-        # Send encrypted payload
-        self._send_encrypted(payload)
-
-        # Receive encrypted response and decrypt
-        resp_data = self._recv_encrypted()
-        resp_str = resp_data.decode('utf-8').strip()
-        return json.loads(resp_str)
-
-    def close(self):
-        if self.conn:
-            self.conn.close()
-        if self.sock:
-            self.sock.close()
-
+MAX_CLIENTS   = 3
+FRAME_RATE    = 20.0
+ADMIN_USER    = 'admin'
+ADMIN_PASS    = 'admin'
 
 class CarController:
-    """
-    Initializes the motor controller and camera,
-    captures frames, and applies commands.
-    """
     def __init__(self):
         self.motor = MotorController()
         self.picam2 = Picamera2()
-        config = self.picam2.create_preview_configuration(main={"size": (640, 380)})
-        self.picam2.configure(config)
+        cfg = self.picam2.create_preview_configuration(main={"size": (640, 380)})
+        self.picam2.configure(cfg)
         self.picam2.start()
         time.sleep(2)
 
     def capture_frame(self):
         frame = self.picam2.capture_array()
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        frame = cv2.rotate(frame, cv2.ROTATE_180)
-        return frame
+        return cv2.rotate(frame, cv2.ROTATE_180)
 
-    def process_pwm_response(self, pwm):
-        left_duty = pwm.get('left_duty', 0.07)
-        right_duty = pwm.get('right_duty', 0.07)
-        left_freq = pwm.get('left_freq', 50)
-        right_freq = pwm.get('right_freq', 50)
-
-        if left_duty == 0.0 and right_duty == 0.0:
+    def process_pwm(self, pwm):
+        t = pwm.get("type")
+        if t == Protocol.CMDS['STOP']:
             self.motor.stop()
-            print("Motor stopped (duty=0)")
+            print("[ADMIN] STOP")
+            return
+
+        left  = pwm.get('left_duty',  0.0)
+        right = pwm.get('right_duty', 0.0)
+        lf    = pwm.get('left_freq', 50)
+        rf    = pwm.get('right_freq',50)
+
+        if left == 0.0 and right == 0.0:
+            self.motor.stop()
+            print("[ADMIN] Motors stopped")
         else:
             self.motor.move_forward(
-                left_duty=left_duty, right_duty=right_duty,
-                left_freq=left_freq, right_freq=right_freq
+                left_duty=left, right_duty=right,
+                left_freq=lf, right_freq=rf
             )
-            print(f"PWM -> Ld: {left_duty:.3f}, Rd: {right_duty:.3f}, "
-                  f"Lf: {left_freq}, Rf: {right_freq}")
+            print(f"[ADMIN] Ld:{left:.3f} Rd:{right:.3f}")
 
     def cleanup(self):
         self.motor.stop()
@@ -158,42 +55,170 @@ class CarController:
         self.picam2.stop()
         self.picam2.close()
 
-
 class CarRemoteServerApp:
-    """
-    Main app: starts the PiServer, then captures frames,
-    sends them to the remote processor, and drives the car.
-    """
-    def __init__(self, host, port, frame_rate=20.0):
-        self.frame_period = 1.0 / frame_rate
-        self.server = PiServer(host, port)
-        self.car = CarController()
-        self.running = False
+    def __init__(self, host, port):
+        self.listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listen_sock.bind((host, port))
+        self.listen_sock.listen(MAX_CLIENTS)
+        print(f"Listening on {host}:{port} (1 admin + {MAX_CLIENTS-1} spectators)")
+        # Create UDP socket for broadcasting frames
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        self.car            = CarController()
+        self.frame_period   = 1.0 / FRAME_RATE
+        self.lock           = threading.Lock()
+        self.clients        = []         # list of Protocol objects; each may have .udp_addr
+        self.admin_protocol = None       # the one admin socket
+        self.running        = True
 
     def run(self):
-        self.server.start()
-        self.running = True
+        # Start broadcasting frames to all clients
+        threading.Thread(target=self._broadcast_frames, daemon=True).start()
+
         try:
             while self.running:
-                t0 = time.time()
-                frame = self.car.capture_frame()
-                pwm = self.server.send_frame(frame)
-                self.car.process_pwm_response(pwm)
-                elapsed = time.time() - t0
-                if elapsed < self.frame_period:
-                    time.sleep(self.frame_period - elapsed)
+                conn, addr = self.listen_sock.accept()
+                print(f"Incoming connection from {addr}")
+                threading.Thread(
+                    target=self._handle_client,
+                    args=(conn, addr),
+                    daemon=True
+                ).start()
         except KeyboardInterrupt:
-            print("Stopping by user interrupt.")
+            print("Shutting down server")
         finally:
-            self.cleanup()
+            self.running = False
+            self.car.cleanup()
+            self.listen_sock.close()
 
-    def cleanup(self):
-        self.car.cleanup()
-        self.server.close()
+    def _handle_client(self, sock, addr):
+        protocol = Protocol('server', None, None, listen_sock=self.listen_sock)
+        protocol.conn = sock
 
+        # For spectators, perform the encryption handshake first
+        try:
+            # Do handshake for non-admin clients;
+            # admin clients will be wrapped with SSL later.
+            protocol._perform_encryption_handshake()
+        except ConnectionClosedError:
+            return
 
-if __name__ == '__main__':
-    HOST = '0.0.0.0'
-    PORT = 8000
-    app = CarRemoteServerApp(HOST, PORT, frame_rate=20.0)
+        db = UserDB()
+        try:
+            auth = False
+            is_admin = False
+            while not auth:
+                req = protocol.recv_json()
+                u, p, t = req.get('username'), req.get('password'), req.get('type')
+
+                if t == Protocol.CMDS['SIGNUP']:
+                    if u == ADMIN_USER:
+                        protocol.send_json({"status":"error","message":"Cannot signup as admin"})
+                        raise ConnectionClosedError()
+                    ok = db.add_user(u, p, req.get('age'))
+                    protocol.send_json({"status":"success"} if ok else {"status":"error","message":"Username exists"})
+                    auth = ok
+
+                elif t == Protocol.CMDS['LOGIN']:
+                    if u == ADMIN_USER:
+                        if p == ADMIN_PASS:
+                            with self.lock:
+                                if self.admin_protocol is None:
+                                    self.admin_protocol = protocol
+                                    is_admin = True
+                                    auth = True
+                                    protocol.send_json({"status":"success"})
+                                    # Removed SSL/TLS wrapping; using plain TCP.
+                                    # RSA-AES encryption handshake already performed in _perform_encryption_handshake.
+                                else:
+                                    protocol.send_json({"status":"error","message":"Admin already connected"})
+                                    raise ConnectionClosedError()
+                        else:
+                            protocol.send_json({"status":"error","message":"Invalid admin credentials"})
+                            raise ConnectionClosedError()
+                    else:
+                        ok = db.verify_user(u, p)
+                        protocol.send_json({"status":"success"} if ok else {"status":"error","message":"Invalid credentials"})
+                        auth = ok
+                else:
+                    protocol.send_json({"status":"error","message":"Invalid request"})
+        except ConnectionClosedError:
+            print(f"Auth failed for {addr}")
+            protocol.close()
+            return
+        finally:
+            db.close()
+
+        print(("ADMIN" if is_admin else "SPECTATOR"), f"{addr} authenticated")
+
+        # Expect UDP port registration from client
+        try:
+            udp_msg = protocol.recv_json()
+            if udp_msg.get("type") == "UDP_PORT":
+                protocol.udp_addr = (addr[0], udp_msg.get("port"))
+        except Exception:
+            protocol.close()
+            return
+
+        with self.lock:
+            self.clients.append(protocol)
+
+        if is_admin:
+            # Admin reads commands over SSL/TLS
+            try:
+                while self.running:
+                    cmd = protocol.recv_json()
+                    self.car.process_pwm(cmd)
+            except ConnectionClosedError:
+                pass
+            finally:
+                print("Admin disconnected, stopping car")
+                self.car.motor.stop()
+        else:
+            try:
+                while self.running:
+                    time.sleep(1)
+            except:
+                pass
+
+        protocol.close()
+        with self.lock:
+            if protocol in self.clients:
+                self.clients.remove(protocol)
+            if protocol is self.admin_protocol:
+                self.admin_protocol = None
+        print(("ADMIN" if is_admin else "SPECTATOR"), f"{addr} disconnected")
+
+    def _broadcast_frames(self):
+        self.udp_socket.setblocking(False)  # avoid blocking on slow clients
+        while self.running:
+            t0 = time.time()
+            frame = self.car.capture_frame()
+            ret, encoded = cv2.imencode(".jpg", frame)
+            if not ret:
+                print("[ERROR] Frame encoding failed")
+                continue
+
+            data = encoded.tobytes()
+            with self.lock:
+                targets = [prot for prot in self.clients if hasattr(prot, "udp_addr")]
+
+            for prot in targets:
+                try:
+                    self.udp_socket.sendto(data, prot.udp_addr)
+                except (BlockingIOError, OSError):
+                    print(f"[WARNING] Dropping frame for {prot.udp_addr}")
+                except Exception as e:
+                    print(f"[ERROR] Failed to send frame to {prot.udp_addr}: {e}")
+                    with self.lock:
+                        if prot in self.clients:
+                            self.clients.remove(prot)
+
+            dt = time.time() - t0
+            if dt < self.frame_period:
+                time.sleep(self.frame_period - dt)
+
+if __name__ == "__main__":
+    app = CarRemoteServerApp('0.0.0.0', 8000)
     app.run()
