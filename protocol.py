@@ -6,8 +6,9 @@ from typing import Optional
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP, AES
 from Crypto import Random
+import cv2
 
-MAX_CLIENTS = 1  # You can adjust this if needed
+MAX_CLIENTS = 1  # Adjustable as needed
 
 class ConnectionClosedError(Exception):
     pass
@@ -17,13 +18,20 @@ class Protocol:
         'SIGNUP': 'signup',
         'LOGIN': 'login',
         'PWM': 'pwm',
-        'STOP': 'stop'
+        'STOP': 'stop',
+        'UDP_PORT': 'udp_port'  # Added for UDP port registration
     }
 
-    def __init__(self, role: str, host: Optional[str], port: Optional[int],
+    # JSON Message Structures:
+    # - 'SIGNUP': {"type": "signup", "username": str, "password": str, "age": int}
+    # - 'LOGIN': {"type": "login", "username": str, "password": str}
+    # - 'PWM': {"type": "pwm", "left_duty": float, "right_duty": float, "left_freq": int, "right_freq": int}
+    # - 'STOP': {"type": "stop"}
+    # - 'UDP_PORT': {"type": "udp_port", "port": int}
+
+    def __init__(self, role: str, host: Optional[str] = None, port: Optional[int] = None,
                  listen_sock: Optional[socket.socket] = None):
         self.role = role
-        # If an existing listening socket is supplied, reuse it
         if role == 'server' and listen_sock is not None:
             self.sock = listen_sock
         else:
@@ -38,124 +46,111 @@ class Protocol:
         self.aes_key = None
 
     def connect(self):
-        if self.role != 'client':
-            raise RuntimeError("connect can only be called on client")
-        self.sock.connect((self.host, self.port))
-        self.conn = self.sock
-        self._perform_encryption_handshake()
+        if self.role == 'client':
+            self.sock.connect((self.host, self.port))
 
     def accept(self):
-        if self.role != 'server':
-            raise RuntimeError("accept can only be called on server")
-        self.conn, addr = self.sock.accept()
-        print(f"Accepted connection from {addr}")
-        self._perform_encryption_handshake()
-
-    def _perform_encryption_handshake(self):
         if self.role == 'server':
-            rsa_key = RSA.generate(2048)
-            rsa_cipher = PKCS1_OAEP.new(rsa_key)
-            pub_key = rsa_key.publickey().export_key()
-            self.conn.sendall(struct.pack('!I', len(pub_key)))
+            self.conn, addr = self.sock.accept()
+            return self.conn, addr
+        return None, None
+
+    def handshake(self):
+        if self.role == 'server':
+            key = RSA.generate(2048)
+            pub_key = key.publickey().exportKey()
+            self.conn.sendall(struct.pack('I', len(pub_key)))
             self.conn.sendall(pub_key)
-            enc_key_len_bytes = self._recvall(4)
-            if enc_key_len_bytes is None:
-                raise ConnectionClosedError("Connection closed during handshake")
-            enc_key_len = struct.unpack('!I', enc_key_len_bytes)[0]
-            enc_key = self._recvall(enc_key_len)
-            if enc_key is None:
-                raise ConnectionClosedError("Connection closed during handshake")
-            self.aes_key = rsa_cipher.decrypt(enc_key)
-        elif self.role == 'client':
-            pub_key_len_bytes = self._recvall(4)
-            if pub_key_len_bytes is None:
-                raise ConnectionClosedError("Connection closed during handshake")
-            pub_key_len = struct.unpack('!I', pub_key_len_bytes)[0]
-            pub_key = self._recvall(pub_key_len)
-            if pub_key is None:
-                raise ConnectionClosedError("Connection closed during handshake")
-            rsa_pub = RSA.import_key(pub_key)
-            rsa_cipher = PKCS1_OAEP.new(rsa_pub)
-            self.aes_key = Random.get_random_bytes(16)
-            enc_key = rsa_cipher.encrypt(self.aes_key)
-            self.conn.sendall(struct.pack('!I', len(enc_key)))
-            self.conn.sendall(enc_key)
+            cipher = PKCS1_OAEP.new(key)
+            encrypted = self.conn.recv(256)
+            self.aes_key = cipher.decrypt(encrypted)
+        else:
+            pub_key_len = struct.unpack('I', self.sock.recv(4))[0]
+            pub_key = self.sock.recv(pub_key_len)
+            cipher = PKCS1_OAEP.new(RSA.importKey(pub_key))
+            self.aes_key = Random.new().read(32)
+            encrypted = cipher.encrypt(self.aes_key)
+            self.sock.sendall(encrypted)
 
-    def _recvall(self, count):
-        buf = b""
-        while count:
-            newbuf = self.conn.recv(count)
-            if not newbuf:
-                return None
-            buf += newbuf
-            count -= len(newbuf)
-        return buf
-
-    def _send_encrypted(self, data: bytes):
-        cipher = AES.new(self.aes_key, AES.MODE_EAX)
-        ciphertext, tag = cipher.encrypt_and_digest(data)
-        self.conn.sendall(struct.pack('!I', len(cipher.nonce)))
-        self.conn.sendall(cipher.nonce)
-        self.conn.sendall(struct.pack('!I', len(tag)))
-        self.conn.sendall(tag)
-        self.conn.sendall(struct.pack('!I', len(ciphertext)))
-        self.conn.sendall(ciphertext)
-
-    def _recv_encrypted(self) -> bytes:
-        nonce_len_bytes = self._recvall(4)
-        if nonce_len_bytes is None:
-            raise ConnectionClosedError("Connection closed while receiving nonce length")
-        nonce_len = struct.unpack('!I', nonce_len_bytes)[0]
-        nonce = self._recvall(nonce_len)
-        if nonce is None:
-            raise ConnectionClosedError("Connection closed while receiving nonce")
-        tag_len_bytes = self._recvall(4)
-        if tag_len_bytes is None:
-            raise ConnectionClosedError("Connection closed while receiving tag length")
-        tag_len = struct.unpack('!I', tag_len_bytes)[0]
-        tag = self._recvall(tag_len)
-        if tag is None:
-            raise ConnectionClosedError("Connection closed while receiving tag")
-        ct_len_bytes = self._recvall(4)
-        if ct_len_bytes is None:
-            raise ConnectionClosedError("Connection closed while receiving ciphertext length")
-        ct_len = struct.unpack('!I', ct_len_bytes)[0]
-        ciphertext = self._recvall(ct_len)
-        if ciphertext is None:
-            raise ConnectionClosedError("Connection closed while receiving ciphertext")
-        cipher = AES.new(self.aes_key, AES.MODE_EAX, nonce=nonce)
-        return cipher.decrypt_and_verify(ciphertext, tag)
-
-    def send_json(self, data: dict):
-        json_bytes = json.dumps(data).encode()
-        self._send_encrypted(json_bytes)
+    def send_json(self, msg: dict):
+        data = json.dumps(msg).encode()
+        cipher = AES.new(self.aes_key, AES.MODE_GCM)
+        ct, tag = cipher.encrypt_and_digest(data)
+        to_send = cipher.nonce + tag + ct
+        length = struct.pack('I', len(to_send))
+        if self.role == 'server':
+            self.conn.sendall(length + to_send)
+        else:
+            self.sock.sendall(length + to_send)
 
     def recv_json(self) -> dict:
-        json_bytes = self._recv_encrypted()
-        return json.loads(json_bytes.decode())
+        sock = self.conn if self.role == 'server' else self.sock
+        length = struct.unpack('I', self._recv_exact(sock, 4))[0]
+        data = self._recv_exact(sock, length)
+        nonce, tag, ct = data[:16], data[16:32], data[32:]
+        cipher = AES.new(self.aes_key, AES.MODE_GCM, nonce=nonce)
+        pt = cipher.decrypt_and_verify(ct, tag)
+        return json.loads(pt.decode())
 
     def send_frame(self, frame: np.ndarray):
-        header = {"shape": frame.shape, "dtype": str(frame.dtype)}
-        header_bytes = json.dumps(header).encode('utf-8')
-        payload = struct.pack('!I', len(header_bytes)) + header_bytes + frame.tobytes()
-        self._send_encrypted(payload)
+        data = frame.tobytes()
+        cipher = AES.new(self.aes_key, AES.MODE_GCM)
+        ct, tag = cipher.encrypt_and_digest(data)
+        to_send = cipher.nonce + tag + ct
+        length = struct.pack('I', len(to_send))
+        if self.role == 'server':
+            self.conn.sendall(length + to_send)
+        else:
+            self.sock.sendall(length + to_send)
 
     def recv_frame(self) -> np.ndarray:
-        payload = self._recv_encrypted()
-        h_len = struct.unpack('!I', payload[:4])[0]
-        header = json.loads(payload[4:4 + h_len].decode())
-        frame_data = payload[4 + h_len:]
-        frame = np.frombuffer(frame_data, dtype=np.dtype(header["dtype"]))
-        frame = frame.reshape(header["shape"])
-        return frame
+        sock = self.conn if self.role == 'server' else self.sock
+        length = struct.unpack('I', self._recv_exact(sock, 4))[0]
+        data = self._recv_exact(sock, length)
+        nonce, tag, ct = data[:16], data[16:32], data[32:]
+        cipher = AES.new(self.aes_key, AES.MODE_GCM, nonce=nonce)
+        pt = cipher.decrypt_and_verify(ct, tag)
+        return np.frombuffer(pt, dtype=np.uint8).reshape((380, 640, 3))
+
+    def _recv_exact(self, sock: socket.socket, n: int) -> bytes:
+        data = b''
+        while len(data) < n:
+            more = sock.recv(n - len(data))
+            if not more:
+                raise ConnectionClosedError()
+            data += more
+        return data
 
     def close(self):
         if self.conn:
             self.conn.close()
-            self.conn = None
-        if self.role == 'client':
-            if self.sock:
-                self.sock.close()
-                self.sock = None
-        # For server, keep listening socket open
-        self.aes_key = None  # Reset AES key
+        if self.role == 'client' or not self.conn:
+            self.sock.close()
+
+    def send_frame_udp(self, frame: np.ndarray, udp_addr: tuple, udp_socket: socket.socket):
+        """
+        Encode the frame to JPEG and send it over UDP to the specified address.
+        
+        :param frame: Numpy array representing the frame.
+        :param udp_addr: Tuple (host, port) to send the frame to.
+        :param udp_socket: UDP socket to use for sending.
+        """
+        ret, encoded = cv2.imencode(".jpg", frame)
+        if not ret:
+            raise ValueError("Failed to encode frame to JPEG")
+        data = encoded.tobytes()
+        udp_socket.sendto(data, udp_addr)
+
+    def recv_frame_udp(self, udp_socket: socket.socket) -> np.ndarray:
+        """
+        Receive a JPEG-encoded frame from the UDP socket and decode it.
+        
+        :param udp_socket: UDP socket to receive from.
+        :return: Decoded frame as a numpy array.
+        """
+        data, _ = udp_socket.recvfrom(65535)  # Assuming max UDP packet size
+        buf = np.frombuffer(data, np.uint8)
+        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if frame is None:
+            raise ValueError("Failed to decode frame from JPEG")
+        return frame

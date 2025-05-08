@@ -98,9 +98,7 @@ class CarRemoteServerApp:
 
         # For spectators, perform the encryption handshake first
         try:
-            # Do handshake for non-admin clients;
-            # admin clients will be wrapped with SSL later.
-            protocol._perform_encryption_handshake()
+            protocol.handshake()  # Updated to use the correct method
         except ConnectionClosedError:
             return
 
@@ -155,7 +153,7 @@ class CarRemoteServerApp:
         # Expect UDP port registration from client
         try:
             udp_msg = protocol.recv_json()
-            if udp_msg.get("type") == "UDP_PORT":
+            if udp_msg.get("type") == Protocol.CMDS['UDP_PORT']:
                 protocol.udp_addr = (addr[0], udp_msg.get("port"))
         except Exception:
             protocol.close()
@@ -195,18 +193,13 @@ class CarRemoteServerApp:
         while self.running:
             t0 = time.time()
             frame = self.car.capture_frame()
-            ret, encoded = cv2.imencode(".jpg", frame)
-            if not ret:
-                print("[ERROR] Frame encoding failed")
-                continue
-
-            data = encoded.tobytes()
             with self.lock:
                 targets = [prot for prot in self.clients if hasattr(prot, "udp_addr")]
 
             for prot in targets:
                 try:
-                    self.udp_socket.sendto(data, prot.udp_addr)
+                    # Use Protocol method to send frame over UDP
+                    prot.send_frame_udp(frame, prot.udp_addr, self.udp_socket)
                 except (BlockingIOError, OSError):
                     print(f"[WARNING] Dropping frame for {prot.udp_addr}")
                 except Exception as e:

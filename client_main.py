@@ -20,20 +20,21 @@ class Client(threading.Thread):
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_socket.bind(('', 0))
         self.udp_port = self.udp_socket.getsockname()[1]
-        # prevent blocking forever
+        # Prevent blocking forever
         self.udp_socket.settimeout(0.2)
 
     def connect(self):
         while True:
             try:
                 self.protocol.connect()
+                self.protocol.handshake()  # Perform encryption handshake to set up AES key
                 print(f"Connected to server {self.protocol.host}:{self.protocol.port}")
                 break
             except (ConnectionRefusedError, socket.timeout):
                 print("Connection failed. Trying again in 2 seconds...")
                 time.sleep(2)
 
-    def send_message(self, msg: dict):
+    def send_message(self, msg):
         self.protocol.send_json(msg)
 
     def recv_message(self) -> dict:
@@ -44,19 +45,9 @@ class Client(threading.Thread):
         frame_count = 0
         while self.running:
             try:
-                # Receive frame
-                t0 = time.time()
-                data, _ = self.udp_socket.recvfrom(65535)
-                t1 = time.time()
-                print(f"[DEBUG] Frame {frame_count}: UDP recv in {t1 - t0:.3f}s")
-
-                # Decode
-                buf = np.frombuffer(data, np.uint8)
-                frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-                if frame is None or frame.size == 0:
-                    print(f"[WARNING] Empty frame at {frame_count}")
-                    frame_count += 1
-                    continue
+                # Receive frame using Protocol method
+                frame = self.protocol.recv_frame_udp(self.udp_socket)
+                frame_count += 1
 
                 # If admin, process; else show only frame
                 if getattr(self.gui, 'is_admin', False):
@@ -74,12 +65,12 @@ class Client(threading.Thread):
                          lf, rf,
                          derivative, integral, prev_error) = self.pid.process(warped)
 
-                        # stopped flag
+                        # Stopped flag
                         if self.gui.control_flags.get("stopped", False):
                             left = right = 0.0
                             lf = rf = 0
 
-                        # send PWM
+                        # Send PWM using Protocol method
                         pwm = {
                             "type": self.protocol.CMDS['PWM'],
                             "left_duty": left,
@@ -89,10 +80,10 @@ class Client(threading.Thread):
                         }
                         self.protocol.send_json(pwm)
 
-                        # build visuals
-                        mask_bgr   = cv2.cvtColor(mask,   cv2.COLOR_GRAY2BGR)
+                        # Build visuals
+                        mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
                         warped_bgr = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
-                        pid_img    = self.gui.pid_graph.update(error, pid_out)
+                        pid_img = self.gui.pid_graph.update(error, pid_out)
 
                         info = (
                             f"Err: {error:.2f} | PID: {pid_out:.4f}\n"
@@ -103,13 +94,11 @@ class Client(threading.Thread):
                         self.gui.update_gui(frame, mask_bgr, warped_bgr, pid_img, info)
                     except Exception as e:
                         print(f"[ERROR] Frame {frame_count} processing failed: {e}")
-                        # still update GUI with raw frame and error
+                        # Still update GUI with raw frame and error
                         self.gui.update_gui(frame, None, None, None, f"Error: {e}")
                 else:
                     # Spectator mode
                     self.gui.update_gui(frame, None, None, None, "Spectator mode")
-
-                frame_count += 1
 
             except socket.timeout:
                 continue
@@ -132,9 +121,10 @@ def main():
         print("Authentication failed or cancelled")
         return
 
-    client.protocol.send_json({"type": "UDP_PORT", "port": client.udp_port})
+    # Send UDP port registration using Protocol.CMDS['UDP_PORT']
+    client.protocol.send_json({"type": client.protocol.CMDS['UDP_PORT'], "port": client.udp_port})
 
-    # assign GUI and role
+    # Assign GUI and role
     if getattr(auth_win, 'role', None) == "ADMIN":
         gui = AdminGUI()
         gui.is_admin = True
@@ -148,6 +138,7 @@ def main():
 
     client.start()
     gui.mainloop()
+
 
 if __name__ == "__main__":
     main()
