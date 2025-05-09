@@ -44,8 +44,6 @@ class Client(threading.Thread):
         while self.running:
             try:
                 msg = self.protocol.recv_json()
-                if msg.get("type") == self.protocol.CMDS['REKEY_REQUEST']:
-                    self.protocol.rekey()
             except:
                 break
 
