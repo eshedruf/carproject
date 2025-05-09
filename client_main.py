@@ -27,7 +27,7 @@ class Client(threading.Thread):
         while True:
             try:
                 self.protocol.connect()
-                self.protocol.handshake()  # Perform encryption handshake to set up AES key
+                self.protocol.key_exchange()  # Perform encryption key exchange to set up AES key
                 print(f"Connected to server {self.protocol.host}:{self.protocol.port}")
                 break
             except (ConnectionRefusedError, socket.timeout):
@@ -40,8 +40,18 @@ class Client(threading.Thread):
     def recv_message(self) -> dict:
         return self.protocol.recv_json()
 
+    def handle_messages(self):
+        while self.running:
+            try:
+                msg = self.protocol.recv_json()
+                if msg.get("type") == self.protocol.CMDS['REKEY_REQUEST']:
+                    self.protocol.rekey()
+            except:
+                break
+
     def run(self):
         self.running = True
+        threading.Thread(target=self.handle_messages, daemon=True).start()
         frame_count = 0
         while self.running:
             try:
@@ -109,7 +119,6 @@ class Client(threading.Thread):
         self.protocol.close()
         print("[INFO] Client thread exited")
 
-
 def main():
     client = Client("raspitwo.local", 8000)
     client.connect()
@@ -138,7 +147,6 @@ def main():
 
     client.start()
     gui.mainloop()
-
 
 if __name__ == "__main__":
     main()

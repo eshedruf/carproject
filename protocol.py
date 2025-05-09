@@ -7,6 +7,7 @@ from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP, AES
 from Crypto import Random
 import cv2
+import base64
 
 MAX_CLIENTS = 1  # Adjustable as needed
 
@@ -15,13 +16,17 @@ class ConnectionClosedError(Exception):
 
 class Protocol:
     CMDS = {
+        'RSAKEY': 'rsakey',
+        'AESKEY': 'aeskey',
         'SIGNUP': 'signup',
         'LOGIN': 'login',
         'PWM': 'pwm',
-        'UDP_PORT': 'udp_port'  # Added for UDP port registration
+        'UDP_PORT': 'udp_port'
     }
 
     # JSON Message Structures:
+    # - 'RSAKEY': {"type": "rsakey", "public_key": str (base64)}
+    # - 'AESKEY': {"type": "aeskey", "encrypted_aes_key": str (base64)}
     # - 'SIGNUP': {"type": "signup", "username": str, "password": str, "age": int}
     # - 'LOGIN': {"type": "login", "username": str, "password": str}
     # - 'PWM': {"type": "pwm", "left_duty": float, "right_duty": float, "left_freq": int, "right_freq": int}
@@ -53,22 +58,42 @@ class Protocol:
             return self.conn, addr
         return None, None
 
-    def handshake(self):
+    def send_unencrypted_json(self, msg: dict):
+        data = json.dumps(msg).encode()
+        length = struct.pack('I', len(data))
         if self.role == 'server':
-            key = RSA.generate(2048)
-            pub_key = key.publickey().exportKey()
-            self.conn.sendall(struct.pack('I', len(pub_key)))
-            self.conn.sendall(pub_key)
-            cipher = PKCS1_OAEP.new(key)
-            encrypted = self.conn.recv(256)
-            self.aes_key = cipher.decrypt(encrypted)
+            self.conn.sendall(length + data)
         else:
-            pub_key_len = struct.unpack('I', self.sock.recv(4))[0]
-            pub_key = self.sock.recv(pub_key_len)
+            self.sock.sendall(length + data)
+
+    def recv_unencrypted_json(self) -> dict:
+        sock = self.conn if self.role == 'server' else self.sock
+        length = struct.unpack('I', self._recv_exact(sock, 4))[0]
+        data = self._recv_exact(sock, length)
+        return json.loads(data.decode())
+
+    def key_exchange(self):
+        if self.role == 'server':
+            rsa_key = RSA.generate(2048)
+            pub_key = rsa_key.publickey().exportKey()
+            pub_key_b64 = base64.b64encode(pub_key).decode()
+            self.send_unencrypted_json({"type": self.CMDS['RSAKEY'], "public_key": pub_key_b64})
+            response = self.recv_unencrypted_json()
+            if response.get("type") != self.CMDS['AESKEY']:
+                raise ValueError("Invalid AESKEY response")
+            encrypted_aes_key = base64.b64decode(response.get("encrypted_aes_key"))
+            cipher = PKCS1_OAEP.new(rsa_key)
+            self.aes_key = cipher.decrypt(encrypted_aes_key)
+        else:
+            init_msg = self.recv_unencrypted_json()
+            if init_msg.get("type") != self.CMDS['RSAKEY']:
+                raise ValueError("Invalid RSAKEY message")
+            pub_key = base64.b64decode(init_msg.get("public_key"))
             cipher = PKCS1_OAEP.new(RSA.importKey(pub_key))
             self.aes_key = Random.new().read(32)
-            encrypted = cipher.encrypt(self.aes_key)
-            self.sock.sendall(encrypted)
+            encrypted_aes_key = cipher.encrypt(self.aes_key)
+            encrypted_aes_key_b64 = base64.b64encode(encrypted_aes_key).decode()
+            self.send_unencrypted_json({"type": self.CMDS['AESKEY'], "encrypted_aes_key": encrypted_aes_key_b64})
 
     def send_json(self, msg: dict):
         data = json.dumps(msg).encode()

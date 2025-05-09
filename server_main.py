@@ -90,9 +90,9 @@ class CarRemoteServerApp:
         protocol = Protocol('server', None, None, listen_sock=self.listen_sock)
         protocol.conn = sock
 
-        # For spectators, perform the encryption handshake first
+        # Perform the encryption key exchange
         try:
-            protocol.handshake()  # Updated to use the correct method
+            protocol.key_exchange()
         except ConnectionClosedError:
             return
 
@@ -121,8 +121,6 @@ class CarRemoteServerApp:
                                     is_admin = True
                                     auth = True
                                     protocol.send_json({"status":"success"})
-                                    # Removed SSL/TLS wrapping; using plain TCP.
-                                    # RSA-AES encryption handshake already performed in _perform_encryption_handshake.
                                 else:
                                     protocol.send_json({"status":"error","message":"Admin already connected"})
                                     raise ConnectionClosedError()
@@ -153,12 +151,11 @@ class CarRemoteServerApp:
             protocol.close()
             return
 
-        with self.lock:
-            self.clients.append(protocol)
-
         if is_admin:
             # Admin reads commands over TCP
             try:
+                with self.lock:
+                    self.clients.append(protocol)
                 while self.running:
                     cmd = protocol.recv_json()
                     self.car.process_pwm(cmd)
@@ -168,6 +165,8 @@ class CarRemoteServerApp:
                 print("Admin disconnected, stopping car")
                 self.car.motor.stop()
         else:
+            with self.lock:
+                self.clients.append(protocol)
             try:
                 while self.running:
                     time.sleep(1)
