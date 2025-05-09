@@ -135,6 +135,43 @@ class Protocol:
         pt = cipher.decrypt_and_verify(ct, tag)
         return np.frombuffer(pt, dtype=np.uint8).reshape((380, 640, 3))
 
+    def send_frame_udp(self, frame: np.ndarray, udp_addr: tuple, udp_socket: socket.socket):
+        """
+        Encode the frame to JPEG, encrypt it with AES-GCM, and send it over UDP to the specified address.
+        
+        :param frame: Numpy array representing the frame.
+        :param udp_addr: Tuple (host, port) to send the frame to.
+        :param udp_socket: UDP socket to use for sending.
+        """
+        ret, encoded = cv2.imencode(".jpg", frame)
+        if not ret:
+            raise ValueError("Failed to encode frame to JPEG")
+        data = encoded.tobytes()
+        cipher = AES.new(self.aes_key, AES.MODE_GCM)
+        ct, tag = cipher.encrypt_and_digest(data)
+        to_send = cipher.nonce + tag + ct
+        length = struct.pack('I', len(to_send))
+        udp_socket.sendto(length + to_send, udp_addr)
+
+    def recv_frame_udp(self, udp_socket: socket.socket) -> np.ndarray:
+        """
+        Receive an AES-GCM encrypted JPEG-encoded frame from the UDP socket, decrypt it, and decode it.
+        
+        :param udp_socket: UDP socket to receive from.
+        :return: Decoded frame as a numpy array.
+        """
+        data, _ = udp_socket.recvfrom(65535)  # Assuming max UDP packet size
+        length = struct.unpack('I', data[:4])[0]
+        data = data[4:4+length]
+        nonce, tag, ct = data[:16], data[16:32], data[32:]
+        cipher = AES.new(self.aes_key, AES.MODE_GCM, nonce=nonce)
+        pt = cipher.decrypt_and_verify(ct, tag)
+        buf = np.frombuffer(pt, np.uint8)
+        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if frame is None:
+            raise ValueError("Failed to decode frame from JPEG")
+        return frame
+
     def _recv_exact(self, sock: socket.socket, n: int) -> bytes:
         data = b''
         while len(data) < n:
@@ -149,31 +186,3 @@ class Protocol:
             self.conn.close()
         if self.role == 'client' or not self.conn:
             self.sock.close()
-
-    def send_frame_udp(self, frame: np.ndarray, udp_addr: tuple, udp_socket: socket.socket):
-        """
-        Encode the frame to JPEG and send it over UDP to the specified address.
-        
-        :param frame: Numpy array representing the frame.
-        :param udp_addr: Tuple (host, port) to send the frame to.
-        :param udp_socket: UDP socket to use for sending.
-        """
-        ret, encoded = cv2.imencode(".jpg", frame)
-        if not ret:
-            raise ValueError("Failed to encode frame to JPEG")
-        data = encoded.tobytes()
-        udp_socket.sendto(data, udp_addr)
-
-    def recv_frame_udp(self, udp_socket: socket.socket) -> np.ndarray:
-        """
-        Receive a JPEG-encoded frame from the UDP socket and decode it.
-        
-        :param udp_socket: UDP socket to receive from.
-        :return: Decoded frame as a numpy array.
-        """
-        data, _ = udp_socket.recvfrom(65535)  # Assuming max UDP packet size
-        buf = np.frombuffer(data, np.uint8)
-        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-        if frame is None:
-            raise ValueError("Failed to decode frame from JPEG")
-        return frame

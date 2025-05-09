@@ -17,7 +17,7 @@ class CarController:
     def __init__(self):
         self.motor = MotorController()
         self.picam2 = Picamera2()
-        cfg = self.picam2.create_preview_configuration(main={"size": (640, 380)})
+        cfg = self.picam2.create_preview_configuration(main={"size": (480, 270)})
         self.picam2.configure(cfg)
         self.picam2.start()
         time.sleep(2)
@@ -68,7 +68,7 @@ class CarRemoteServerApp:
 
     def run(self):
         # Start broadcasting frames to all clients
-        threading.Thread(target=self._broadcast_frames, daemon=True).start()
+        threading.Thread(target=self._send_frames, daemon=True).start()
 
         try:
             while self.running:
@@ -181,7 +181,7 @@ class CarRemoteServerApp:
                 self.admin_protocol = None
         print(("ADMIN" if is_admin else "SPECTATOR"), f"{addr} disconnected")
 
-    def _broadcast_frames(self):
+    def _send_frames(self):
         self.udp_socket.setblocking(False)  # avoid blocking on slow clients
         while self.running:
             t0 = time.time()
@@ -191,7 +191,7 @@ class CarRemoteServerApp:
 
             for prot in targets:
                 try:
-                    # Use Protocol method to send frame over UDP
+                    # Use Protocol method to send encrypted frame over UDP
                     prot.send_frame_udp(frame, prot.udp_addr, self.udp_socket)
                 except (BlockingIOError, OSError):
                     print(f"[WARNING] Dropping frame for {prot.udp_addr}")
