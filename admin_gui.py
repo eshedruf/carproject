@@ -46,7 +46,7 @@ class PIDGraph:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (150,0,0), 2)
         return graph
 
-class GUI(tk.Tk):
+class AdminGUI(tk.Tk):
     """GUI for displaying video feed, PID graph, car IP, and debug data."""
     
     def __init__(self):

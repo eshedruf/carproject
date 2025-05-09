@@ -18,7 +18,6 @@ class Protocol:
         'SIGNUP': 'signup',
         'LOGIN': 'login',
         'PWM': 'pwm',
-        'STOP': 'stop',
         'UDP_PORT': 'udp_port'  # Added for UDP port registration
     }
 
@@ -26,7 +25,6 @@ class Protocol:
     # - 'SIGNUP': {"type": "signup", "username": str, "password": str, "age": int}
     # - 'LOGIN': {"type": "login", "username": str, "password": str}
     # - 'PWM': {"type": "pwm", "left_duty": float, "right_duty": float, "left_freq": int, "right_freq": int}
-    # - 'STOP': {"type": "stop"}
     # - 'UDP_PORT': {"type": "udp_port", "port": int}
 
     def __init__(self, role: str, host: Optional[str] = None, port: Optional[int] = None,

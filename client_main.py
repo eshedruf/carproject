@@ -5,7 +5,7 @@ import cv2
 import socket
 from image_utils import ImgUtils
 from pid_controller import PID
-from admin_gui import GUI as AdminGUI
+from admin_gui import AdminGUI
 from spec_gui import SpectatorGUI
 from auth_window import AuthWindow
 from protocol import Protocol

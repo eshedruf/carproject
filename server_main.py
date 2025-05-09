@@ -28,12 +28,6 @@ class CarController:
         return cv2.rotate(frame, cv2.ROTATE_180)
 
     def process_pwm(self, pwm):
-        t = pwm.get("type")
-        if t == Protocol.CMDS['STOP']:
-            self.motor.stop()
-            print("[ADMIN] STOP")
-            return
-
         left  = pwm.get('left_duty',  0.0)
         right = pwm.get('right_duty', 0.0)
         lf    = pwm.get('left_freq', 50)
@@ -163,7 +157,7 @@ class CarRemoteServerApp:
             self.clients.append(protocol)
 
         if is_admin:
-            # Admin reads commands over SSL/TLS
+            # Admin reads commands over TCP
             try:
                 while self.running:
                     cmd = protocol.recv_json()
