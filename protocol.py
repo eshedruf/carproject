@@ -115,17 +115,6 @@ class Protocol:
         pt = cipher.decrypt_and_verify(ct, tag)
         return json.loads(pt.decode())
 
-    def send_frame(self, frame: np.ndarray):
-        data = frame.tobytes()
-        cipher = AES.new(self.aes_key, AES.MODE_GCM)
-        ct, tag = cipher.encrypt_and_digest(data)
-        to_send = cipher.nonce + tag + ct
-        length = struct.pack('I', len(to_send))
-        if self.role == 'server':
-            self.conn.sendall(length + to_send)
-        else:
-            self.sock.sendall(length + to_send)
-
     def recv_frame(self) -> np.ndarray:
         sock = self.conn if self.role == 'server' else self.sock
         length = struct.unpack('I', self._recv_exact(sock, 4))[0]
